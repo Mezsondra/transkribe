@@ -134,13 +134,6 @@
             this.$searchOptionsMenu = $('#searchOptionsMenu');
         }
 
-rgbToHex(rgb) {
-    if (!rgb || !rgb.startsWith('rgb')) return '#ffeb3b'; // Default color
-    const colors = rgb.match(/\d+/g).map(Number);
-    const toHex = (c) => ('0' + c.toString(16)).slice(-2);
-    return `#${toHex(colors[0])}${toHex(colors[1])}${toHex(colors[2])}`;
-}
-
         bindEvents() {
             // Audio Controls
             this.$playBtn.on('click', () => this.togglePlayPause());
@@ -1073,6 +1066,7 @@ updateHighlightsForEditedText() {
         }
         
         highlightSearchTermInElement($element, searchText, matchCase) {
+            if (!searchText || searchText.trim().length === 0) return;
             const regex = new RegExp(`(${searchText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, matchCase ? 'g' : 'gi');
             
             // Process each text node and word span
@@ -1253,11 +1247,12 @@ updateHighlightsForEditedText() {
 
         onTimeUpdate() {
             if (!this.audioPlayer || isNaN(this.audioPlayer.duration)) return;
-            
+
             const currentTime = this.audioPlayer.currentTime;
+            const duration = this.audioPlayer.duration || 1; // Prevent division by zero
             this.$currentTime.text(this.formatTime(currentTime));
             this.$progressBar.val(currentTime);
-            this.$progressBar.css('--progress', `${(currentTime / this.audioPlayer.duration) * 100}%`);
+            this.$progressBar.css('--progress', `${(currentTime / duration) * 100}%`);
             this.highlightCurrentElements(currentTime * 1000);
         }
 
@@ -1818,9 +1813,9 @@ handleTextSelection(e) {
                     this.seekTo(h.start_time / 1000);
                 }
             };
-            
-            $list.find('.delete-highlight').on('click', deleteHandler);
-            $list.find('.highlight-item').on('click', clickHandler);
+
+            $list.find('.delete-highlight').off('click').on('click', deleteHandler);
+            $list.find('.highlight-item').off('click').on('click', clickHandler);
         }
 
         deleteHighlight(id) {
@@ -2174,6 +2169,14 @@ handleTextSelection(e) {
                 "'": '&#039;'
             })[m]);
         }
+
+        rgbToHex(rgb) {
+            if (!rgb || !rgb.startsWith('rgb')) return '#ffeb3b'; // Default color
+            const colors = rgb.match(/\d+/g).map(Number);
+            const toHex = (c) => ('0' + c.toString(16)).slice(-2);
+            return `#${toHex(colors[0])}${toHex(colors[1])}${toHex(colors[2])}`;
+        }
+
 // REPLACE your entire showLoading function with this one:
 
         showLoading(show) {
@@ -2201,8 +2204,10 @@ handleTextSelection(e) {
         }
 
         showNotification(message, type = 'info') {
+            const validTypes = ['success', 'error', 'info', 'warning'];
+            const safeType = validTypes.includes(type) ? type : 'info';
             const $note = $(`
-                <div class="notification notification-${type}">
+                <div class="notification notification-${safeType}">
                     ${this.escapeHtml(message)}
                     <button class="notification-close">&times;</button>
                 </div>

@@ -296,23 +296,23 @@
                                 }, 2000);
                                 
                             } else if (status === 'processing' || status === 'queued') {
-                                   // FIX: Use real progress from API if available, otherwise fall back to estimation.
-    let progress = 30; // Base progress after upload
-    if (response.data.progress_percent !== undefined && response.data.progress_percent !== null) {
-        // AssemblyAI provides progress_percent, use it. (API response structure may vary)
-        // Let's assume it's `response.data.progress_percent`.
-        // We'll scale it to be between 30% and 95%.
-        progress = 30 + (response.data.progress_percent * 0.65);
-    } else {
-        // Fallback to the estimated progress
-        progress = 30 + (pollCount * 2);
-    }
-    progress = Math.min(progress, 95); // Cap at 95%
+                                // FIX: Use real progress from API if available, otherwise fall back to estimation.
+                                let progress = 30; // Base progress after upload
+                                if (response.data.progress_percent !== undefined && response.data.progress_percent !== null) {
+                                    // AssemblyAI provides progress_percent, use it. (API response structure may vary)
+                                    // We'll scale it to be between 30% and 95%.
+                                    progress = 30 + (response.data.progress_percent * 0.65);
+                                } else {
+                                    // Fallback to the estimated progress
+                                    progress = 30 + (pollCount * 2);
+                                }
+                                progress = Math.min(progress, 95); // Cap at 95%
 
-    const languageName = this.config.languages ? this.config.languages[this.selectedLanguage] : this.selectedLanguage;
-    this.showProgress(progress, `Processing ${languageName} transcript... (${status})`);
-    
-} else if (status === 'error') {                                this.stopPolling();
+                                const languageName = this.config.languages ? this.config.languages[this.selectedLanguage] : this.selectedLanguage;
+                                this.showProgress(progress, `Processing ${languageName} transcript... (${status})`);
+
+                            } else if (status === 'error') {
+                                this.stopPolling();
                                 this.handleError('Transcription failed. Please try again.');
                             }
                         } else {
@@ -421,14 +421,18 @@
                 info: 'notification-info',
                 warning: 'notification-warning'
             };
-            
+
+            // Validate type to prevent XSS
+            const validTypes = ['success', 'error', 'info', 'warning'];
+            const safeType = validTypes.includes(type) ? type : 'info';
+
             // Remove existing notifications
             $('.notification').remove();
-            
+
             const escapedMessage = this.escapeHtml(message);
-            
+
             const $notification = $(`
-                <div class="notification ${typeClasses[type]}">
+                <div class="notification ${typeClasses[safeType]}">
                     <span class="notification-message">${escapedMessage}</span>
                     <button class="notification-close" type="button">&times;</button>
                 </div>
