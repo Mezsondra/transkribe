@@ -140,15 +140,6 @@
             this.$copyMenu = $('#copyMenu');
             this.$copyTranslationOption = this.$copyMenu.find('.translation-option');
 
-            if (this.$copyMenu && this.$copyMenu.length) {
-                this.$copyMenu.attr('aria-hidden', 'true');
-            }
-
-            const $copyArrow = this.$copyBtn.find('.dropdown-arrow');
-            if ($copyArrow.length) {
-                $copyArrow.attr('aria-hidden', 'true');
-            }
-
             this.updateCopyButtonState();
         }
 
@@ -683,11 +674,10 @@ if (utterance.is_edited || !utterance.words || utterance.words.length === 0) {
         handleCopyButtonClick(e) {
             if (!this.$copyBtn || !this.$copyBtn.length) return;
 
-            e.preventDefault();
-
             const clickedArrow = $(e.target).closest('.dropdown-arrow').length > 0;
 
             if (this.isTranslationVisible() && clickedArrow) {
+                e.preventDefault();
                 e.stopPropagation();
                 this.toggleCopyMenu();
                 return;
@@ -723,7 +713,6 @@ if (utterance.is_edited || !utterance.words || utterance.words.length === 0) {
                 : !this.$copyMenu.hasClass('open');
 
             this.$copyMenu.toggleClass('open', shouldOpen);
-            this.$copyMenu.attr('aria-hidden', shouldOpen ? 'false' : 'true');
             this.updateCopyButtonState();
         }
 
@@ -801,7 +790,7 @@ if (utterance.is_edited || !utterance.words || utterance.words.length === 0) {
                 }
 
                 if (speaker) {
-                    parts.push(`**${speaker}**:`);
+                    parts.push(`${speaker}:`);
                 }
 
                 parts.push(text);
@@ -813,7 +802,7 @@ if (utterance.is_edited || !utterance.words || utterance.words.length === 0) {
                 }
             });
 
-            return lines.join('\n\n');
+            return lines.join('\n');
         }
 
         extractUtteranceTextForCopy($element, includeSentenceTimestamps = false) {
@@ -838,25 +827,23 @@ if (utterance.is_edited || !utterance.words || utterance.words.length === 0) {
         copyToClipboard(text) {
             if (!text) return Promise.resolve();
 
-            const fallbackCopy = () => new Promise((resolve, reject) => {
+            if (navigator.clipboard && window.isSecureContext) {
+                return navigator.clipboard.writeText(text);
+            }
+
+            return new Promise((resolve, reject) => {
                 const textarea = document.createElement('textarea');
                 textarea.value = text;
                 textarea.setAttribute('readonly', '');
-                textarea.style.position = 'fixed';
-                textarea.style.top = '-9999px';
+                textarea.style.position = 'absolute';
                 textarea.style.left = '-9999px';
                 document.body.appendChild(textarea);
-                const activeElement = document.activeElement;
-                textarea.focus();
                 textarea.select();
                 textarea.setSelectionRange(0, textarea.value.length);
 
                 try {
                     const successful = document.execCommand('copy');
                     document.body.removeChild(textarea);
-                    if (activeElement && typeof activeElement.focus === 'function') {
-                        activeElement.focus();
-                    }
                     if (successful) {
                         resolve();
                     } else {
@@ -864,18 +851,9 @@ if (utterance.is_edited || !utterance.words || utterance.words.length === 0) {
                     }
                 } catch (error) {
                     document.body.removeChild(textarea);
-                    if (activeElement && typeof activeElement.focus === 'function') {
-                        activeElement.focus();
-                    }
                     reject(error);
                 }
             });
-
-            if (navigator.clipboard && window.isSecureContext && typeof navigator.clipboard.writeText === 'function') {
-                return navigator.clipboard.writeText(text).catch(() => fallbackCopy());
-            }
-
-            return fallbackCopy();
         }
 
         isTranslationVisible() {
@@ -904,15 +882,11 @@ if (utterance.is_edited || !utterance.words || utterance.words.length === 0) {
                 if (this.$copyDropdown && this.$copyDropdown.length) {
                     this.$copyDropdown.addClass('has-translation');
                 }
-                if (this.$copyMenu && this.$copyMenu.length) {
-                    this.$copyMenu.attr('aria-hidden', menuIsOpen ? 'false' : 'true');
-                }
             } else {
                 this.$copyBtn.removeAttr('aria-haspopup');
                 this.$copyBtn.removeAttr('aria-expanded');
                 if (this.$copyMenu && this.$copyMenu.length) {
                     this.$copyMenu.removeClass('open');
-                    this.$copyMenu.attr('aria-hidden', 'true');
                 }
                 if (this.$copyDropdown && this.$copyDropdown.length) {
                     this.$copyDropdown.removeClass('has-translation');
