@@ -319,6 +319,50 @@
 .translate-language-item { padding: 0.5rem 1rem; cursor: pointer; font-size: 0.875rem; color: #374151; transition: background-color 0.2s; white-space: nowrap; }
 .translate-language-item:hover { background-color: #f3f4f6; }
 
+.copy-dropdown-container #copyTranscriptBtn .dropdown-arrow {
+    display: none;
+    font-size: 1.25rem;
+    margin-left: 0.25rem;
+}
+
+.copy-dropdown-container #copyTranscriptBtn.has-dropdown .dropdown-arrow {
+    display: inline-flex;
+}
+
+.copy-dropdown-container #copyTranscriptBtn.menu-open .dropdown-arrow {
+    transform: rotate(180deg);
+}
+
+.copy-dropdown-container .copy-option {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.5rem 1rem;
+    cursor: pointer;
+    font-size: 0.875rem;
+    color: #374151;
+    transition: background-color 0.2s;
+    white-space: nowrap;
+}
+
+.copy-dropdown-container .copy-option:hover {
+    background-color: #f3f4f6;
+}
+
+.copy-dropdown-container .copy-option.disabled {
+    opacity: 0.5;
+    cursor: default;
+    pointer-events: none;
+}
+
+.copy-dropdown-container .translation-option {
+    display: none;
+}
+
+.copy-dropdown-container.has-translation .translation-option {
+    display: flex;
+}
+
 /* Summary & Highlights Boxes */
 #summaryBox, #highlightBox {
     display: none;
