@@ -37,6 +37,7 @@
             this.currentUtterance = -1;
             this.highlights = [];
             this.highlightMode = false;
+            this.currentTimestampMode = 'utterance';
             this.selectedText = '';
             this.speakerMap = {};
             this.searchResults = [];
@@ -132,6 +133,14 @@
             this.$replaceContainer = $('#replaceContainer');
             this.$searchOptionsBtn = $('#searchOptionsBtn');
             this.$searchOptionsMenu = $('#searchOptionsMenu');
+
+            // Copy Controls
+            this.$copyDropdown = $('#copyDropdown');
+            this.$copyBtn = $('#copyTranscriptBtn');
+            this.$copyMenu = $('#copyMenu');
+            this.$copyTranslationOption = this.$copyMenu.find('.translation-option');
+
+            this.updateCopyButtonState();
         }
 
 rgbToHex(rgb) {
@@ -235,22 +244,39 @@ rgbToHex(rgb) {
             
             const languageSelectionHandler = (e) => this.handleLanguageSelection(e);
             this.$translateLanguageList.on('click', '.translate-language-item', languageSelectionHandler);
-            this.eventHandlers.set('language-selection', { 
-                element: this.$translateLanguageList, 
-                event: 'click', 
+            this.eventHandlers.set('language-selection', {
+                element: this.$translateLanguageList,
+                event: 'click',
                 selector: '.translate-language-item',
-                handler: languageSelectionHandler 
+                handler: languageSelectionHandler
             });
-            
+
             this.$closeTranslationBtn.on('click', () => this.hideTranslation());
-            
+
+            // Copy controls
+            if (this.$copyBtn && this.$copyBtn.length) {
+                this.$copyBtn.on('click', (e) => this.handleCopyButtonClick(e));
+                this.$copyBtn.on('keydown', (e) => {
+                    if (!this.isTranslationVisible()) return;
+                    if (e.key === 'ArrowDown' || (e.key === 'Enter' && e.altKey)) {
+                        e.preventDefault();
+                        this.toggleCopyMenu(true);
+                    }
+                });
+            }
+
+            if (this.$copyMenu && this.$copyMenu.length) {
+                this.$copyMenu.on('click', '.copy-option', (e) => this.handleCopyOptionClick(e));
+            }
+
             // Global clicks
             $(document).on('click', (e) => {
                 if (!$(e.target).closest('.control-dropdown-container').length) {
                     $('.control-dropdown-menu.open').removeClass('open');
                     $('.control-btn[aria-expanded="true"]').attr('aria-expanded', false);
+                    this.updateCopyButtonState();
                 }
-                if (!$(e.target).closest('.highlight-popup').length && 
+                if (!$(e.target).closest('.highlight-popup').length &&
                     !$(e.target).closest('.utterance-text').length) {
                     $('.highlight-popup').remove();
                 }
@@ -613,7 +639,10 @@ if (utterance.is_edited || !utterance.words || utterance.words.length === 0) {
                 warn('Timestamp controls not found');
                 return;
             }
-            
+
+            mode = mode || 'utterance';
+            this.currentTimestampMode = mode;
+
             this.$transcriptContent.removeClass('show-sentence-timestamps hide-utterance-timestamps');
             this.$timestampsMenu.removeClass('open');
             this.$timestampsBtn.attr('aria-expanded', false);
@@ -633,6 +662,247 @@ if (utterance.is_edited || !utterance.words || utterance.words.length === 0) {
                 default:
                     this.$timestampsBtnLabel.text('Per Utterance');
                     break;
+            }
+
+            this.updateCopyButtonState();
+        }
+
+        // ==========================================
+        // COPY SHORTCUTS
+        // ==========================================
+
+        handleCopyButtonClick(e) {
+            if (!this.$copyBtn || !this.$copyBtn.length) return;
+
+            const clickedArrow = $(e.target).closest('.dropdown-arrow').length > 0;
+
+            if (this.isTranslationVisible() && clickedArrow) {
+                e.preventDefault();
+                e.stopPropagation();
+                this.toggleCopyMenu();
+                return;
+            }
+
+            this.copyTranscriptText('original');
+
+            if (this.$copyMenu && this.$copyMenu.hasClass('open')) {
+                this.toggleCopyMenu(false);
+            }
+        }
+
+        handleCopyOptionClick(e) {
+            e.preventDefault();
+            const $option = $(e.currentTarget);
+
+            if ($option.hasClass('disabled')) {
+                return;
+            }
+
+            const target = $option.data('target') || 'original';
+            this.copyTranscriptText(target);
+            this.toggleCopyMenu(false);
+        }
+
+        toggleCopyMenu(forceState) {
+            if (!this.$copyMenu || !this.$copyMenu.length || !this.isTranslationVisible()) {
+                return;
+            }
+
+            const shouldOpen = typeof forceState === 'boolean'
+                ? forceState
+                : !this.$copyMenu.hasClass('open');
+
+            this.$copyMenu.toggleClass('open', shouldOpen);
+            this.updateCopyButtonState();
+        }
+
+        copyTranscriptText(target = 'original') {
+            const { text, error } = this.getCopyText(target);
+
+            if (!text) {
+                if (error) {
+                    this.showNotification(error, 'warning');
+                }
+                return;
+            }
+
+            this.copyToClipboard(text)
+                .then(() => {
+                    const label = target === 'translation' ? 'Translation' : 'Transcript';
+                    this.showNotification(`${label} copied to clipboard.`, 'success');
+                })
+                .catch(() => {
+                    this.showNotification('Unable to copy to clipboard.', 'error');
+                });
+        }
+
+        getCopyText(target) {
+            const options = {
+                includeUtteranceTimestamps: false,
+                includeSentenceTimestamps: false
+            };
+
+            let $container = null;
+
+            if (target === 'translation') {
+                if (!this.isTranslationCopyAvailable()) {
+                    return { text: '', error: 'Translation not ready yet.' };
+                }
+
+                $container = this.$translationContent;
+                options.includeUtteranceTimestamps = true;
+            } else {
+                if (!this.$transcriptContent || !this.$transcriptContent.length ||
+                    !this.$transcriptContent.find('.utterance-row').length) {
+                    return { text: '', error: 'Transcript not ready yet.' };
+                }
+
+                $container = this.$transcriptContent;
+                options.includeUtteranceTimestamps = this.currentTimestampMode === 'utterance';
+                options.includeSentenceTimestamps = this.currentTimestampMode === 'sentence';
+            }
+
+            const text = this.buildCopyTextFromContainer($container, options);
+
+            return {
+                text,
+                error: text ? null : 'Nothing to copy.'
+            };
+        }
+
+        buildCopyTextFromContainer($container, options = {}) {
+            if (!$container || !$container.length) return '';
+
+            const lines = [];
+
+            $container.find('.utterance-row').each((index, row) => {
+                const $row = $(row);
+                const speaker = this.normalizeCopiedText($row.find('.speaker-label').text());
+                const timestamp = this.normalizeCopiedText($row.find('.utterance-timestamp').text());
+                const text = this.extractUtteranceTextForCopy($row.find('.utterance-text'), options.includeSentenceTimestamps);
+
+                if (!text) return;
+
+                const parts = [];
+
+                if (options.includeUtteranceTimestamps && timestamp) {
+                    parts.push(`[${timestamp}]`);
+                }
+
+                if (speaker) {
+                    parts.push(`${speaker}:`);
+                }
+
+                parts.push(text);
+
+                const line = this.normalizeCopiedText(parts.join(' '));
+
+                if (line) {
+                    lines.push(line);
+                }
+            });
+
+            return lines.join('\n');
+        }
+
+        extractUtteranceTextForCopy($element, includeSentenceTimestamps = false) {
+            if (!$element || !$element.length) return '';
+
+            const $clone = $element.clone();
+
+            if (!includeSentenceTimestamps) {
+                $clone.find('.sentence-timestamp').remove();
+            }
+
+            $clone.find('.utterance-timestamp').remove();
+
+            return this.normalizeCopiedText($clone.text());
+        }
+
+        normalizeCopiedText(text) {
+            if (!text) return '';
+            return text.replace(/\s+/g, ' ').trim();
+        }
+
+        copyToClipboard(text) {
+            if (!text) return Promise.resolve();
+
+            if (navigator.clipboard && window.isSecureContext) {
+                return navigator.clipboard.writeText(text);
+            }
+
+            return new Promise((resolve, reject) => {
+                const textarea = document.createElement('textarea');
+                textarea.value = text;
+                textarea.setAttribute('readonly', '');
+                textarea.style.position = 'absolute';
+                textarea.style.left = '-9999px';
+                document.body.appendChild(textarea);
+                textarea.select();
+                textarea.setSelectionRange(0, textarea.value.length);
+
+                try {
+                    const successful = document.execCommand('copy');
+                    document.body.removeChild(textarea);
+                    if (successful) {
+                        resolve();
+                    } else {
+                        reject();
+                    }
+                } catch (error) {
+                    document.body.removeChild(textarea);
+                    reject(error);
+                }
+            });
+        }
+
+        isTranslationVisible() {
+            return this.$translationWrapper && this.$translationWrapper.is(':visible');
+        }
+
+        isTranslationCopyAvailable() {
+            return this.isTranslationVisible() &&
+                this.$translationContent &&
+                this.$translationContent.find('.utterance-row').length > 0 &&
+                !this.$translationContent.find('.loading-state').length;
+        }
+
+        updateCopyButtonState() {
+            if (!this.$copyBtn || !this.$copyBtn.length) return;
+
+            const translationVisible = this.isTranslationVisible();
+            const menuIsOpen = this.$copyMenu && this.$copyMenu.hasClass('open');
+
+            this.$copyBtn.toggleClass('has-dropdown', translationVisible);
+            this.$copyBtn.toggleClass('menu-open', translationVisible && menuIsOpen);
+
+            if (translationVisible) {
+                this.$copyBtn.attr('aria-haspopup', 'true');
+                this.$copyBtn.attr('aria-expanded', menuIsOpen ? 'true' : 'false');
+                if (this.$copyDropdown && this.$copyDropdown.length) {
+                    this.$copyDropdown.addClass('has-translation');
+                }
+            } else {
+                this.$copyBtn.removeAttr('aria-haspopup');
+                this.$copyBtn.removeAttr('aria-expanded');
+                if (this.$copyMenu && this.$copyMenu.length) {
+                    this.$copyMenu.removeClass('open');
+                }
+                if (this.$copyDropdown && this.$copyDropdown.length) {
+                    this.$copyDropdown.removeClass('has-translation');
+                }
+                menuIsOpen && this.$copyBtn.removeClass('menu-open');
+            }
+
+            if (this.$copyTranslationOption && this.$copyTranslationOption.length) {
+                const translationReady = this.isTranslationCopyAvailable();
+                this.$copyTranslationOption.toggleClass('disabled', !translationReady);
+
+                if (translationVisible) {
+                    this.$copyTranslationOption.attr('aria-disabled', translationReady ? 'false' : 'true');
+                } else {
+                    this.$copyTranslationOption.removeAttr('aria-disabled');
+                }
             }
         }
 
@@ -1932,6 +2202,7 @@ handleTextSelection(e) {
             $('#transcript-area-container').addClass('translation-active');
             this.$translationWrapper.show();
             this.$translationContent.html('<div class="loading-state"><p>Select a language.</p></div>');
+            this.updateCopyButtonState();
         }
 
        // REPLACE the entire translateTranscript function with this one:
@@ -1993,16 +2264,20 @@ handleTextSelection(e) {
                 } else {
                     this.$translationContent.html(`<div class="error-message">${this.escapeHtml(res.data || 'Translation failed')}</div>`);
                 }
+
+                this.updateCopyButtonState();
             })
             .fail(() => {
                 this.$translationContent.html('<div class="error-message">Network error.</div>');
+                this.updateCopyButtonState();
             });
         }
-        
+
         hideTranslation() {
             this.$translationWrapper.hide();
             $('#transcript-area-container').removeClass('translation-active');
             this.$translateLanguageList.removeClass('open');
+            this.updateCopyButtonState();
         }
 
         // Export with title as filename
