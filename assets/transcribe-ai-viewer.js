@@ -379,6 +379,16 @@ this.$transcriptContent.on('click', '.utterance-text', e => {
         this.seekTo(targetWord.start / 1000);
     }
 });
+
+// Add click-to-seek for the translation panel
+            this.$translationContent.on('click', '.utterance-row', e => {
+                // Clicks on translation rows should seek the audio player
+                if (this.isEditing) return;
+                const startTime = $(e.currentTarget).data('start');
+                if (startTime !== undefined) {
+                    this.seekTo(startTime / 1000);
+                }
+            });
             // Keyboard shortcuts
             $(document).on('keydown', e => this.handleKeyboard(e));
             
@@ -898,18 +908,28 @@ saveTranscript(showNotification = true) {
         speaker_map: JSON.stringify(this.speakerMap),
         nonce: this.nonce
     })
-    .done(res => {
-        if (res.success) {
-            this.hasUnsavedChanges = false;
-            this.transcriptData.data = dataToSave;
-            this.transcriptData.speaker_map = this.speakerMap;
-            if (showNotification) this.showNotification('Transcript saved!', 'success');
-            this.renderTranscript();
-            this.applyHighlights();
-        } else {
-            if (showNotification) this.showNotification(res.data || 'Save failed', 'error');
-        }
-    })
+   .done(res => {
+                if (res.success) {
+                    // Always update the data in the background
+                    this.hasUnsavedChanges = false;
+                    this.transcriptData.data = dataToSave;
+                    this.transcriptData.speaker_map = this.speakerMap;
+                    
+                    if (showNotification) {
+                        // This was a MANUAL save.
+                        // Show notification and re-render the transcript.
+                        this.showNotification('Transcript saved!', 'success');
+                        this.renderTranscript();
+                        this.applyHighlights();
+                    } else {
+                        // This was an AUTOSAVE.
+                        // Do NOT re-render, just log it.
+                        console.log('Autosave successful.');
+                    }
+                } else {
+                    if (showNotification) this.showNotification(res.data || 'Save failed', 'error');
+                }
+            })
     .fail(() => {
         if (showNotification) this.showNotification('Network error.', 'error');
     })
@@ -1261,7 +1281,7 @@ updateHighlightsForEditedText() {
             this.highlightCurrentElements(currentTime * 1000);
         }
 
-       // In transcribe-ai-viewer.js, REPLACE the entire highlightCurrentElements function with this:
+// In transcribe-ai-viewer.js, REPLACE the entire highlightCurrentElements function with this:
 highlightCurrentElements(timeMs) {
     // **FIX: Don't update highlights when user is selecting text**
     if (this.isSelectingText) {
@@ -1306,9 +1326,13 @@ highlightCurrentElements(timeMs) {
             // CASE 2: Edited text (no .word spans, but we have preserved timing data)
             if (utteranceData.words && utteranceData.words.length > 0) {
                 let activeWordData = null;
-                for (const word of utteranceData.words) {
+                let wordIndexInOriginalData = -1; // The index (0, 1, 2...) of the active word
+
+                for (let i = 0; i < utteranceData.words.length; i++) {
+                    const word = utteranceData.words[i];
                     if (timeMs >= word.start && timeMs <= word.end) {
                         activeWordData = word;
+                        wordIndexInOriginalData = i;
                         break;
                     }
                 }
@@ -1323,60 +1347,85 @@ highlightCurrentElements(timeMs) {
                     );
 
                     if (isInHighlight) {
-                        // Word is in a highlight - don't create dynamic span to avoid disrupting the mark structure
-                        // Just skip it - the highlight will remain visible without the active-word outline
+                        // Word is in a highlight - don't create dynamic span
                         return;
                     }
 
-                    // Word is not in a highlight - create dynamic span as before
-                    let startCharOffset = 0;
-                    for (const word of utteranceData.words) {
-                        if (word.start < activeWordData.start) {
-                            startCharOffset += (word.text.length + 1);
-                        } else {
-                            break;
-                        }
-                    }
-                    const endCharOffset = startCharOffset + activeWordData.text.length;
-
-                    const wrapRange = (element, start, end) => {
-                        const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT, null, false);
-                        let charCount = 0;
-                        let startNode, endNode, startOffset, endOffset;
-
-                        while (walker.nextNode()) {
-                            const node = walker.currentNode;
-                            const nodeLength = node.nodeValue.length;
-
-                            if (startNode === undefined && start < charCount + nodeLength) {
-                                startNode = node;
-                                startOffset = start - charCount;
-                            }
-                            if (endNode === undefined && end <= charCount + nodeLength) {
-                                endNode = node;
-                                endOffset = end - charCount;
-                                break;
-                            }
-                            charCount += nodeLength;
-                        }
-
-                        if (startNode && endNode) {
-                            const range = document.createRange();
-                            range.setStart(startNode, startOffset);
-                            range.setEnd(endNode, endOffset);
-                            
-                            const span = document.createElement('span');
-                            span.className = 'word active-word';
-                            try {
-                                range.surroundContents(span);
-                                self.dynamicHighlightSpan = span;
-                            } catch (e) {
-                                // Range invalid, ignore
-                            }
-                        }
-                    };
+                    // --- START: FIX FOR EDITED WORD HIGHLIGHTING ---
+                    // Find the character offsets for the Nth word *in the current DOM text*.
                     
-                    wrapRange($row.find('.utterance-text')[0], startCharOffset, endCharOffset);
+                    const $textElement = $row.find('.utterance-text');
+                    const domText = $textElement.text();
+                    
+                    // This regex splits text into words and the spaces between them
+                    const domTextParts = domText.split(/(\s+)/).filter(part => part.length > 0);
+
+                    let startCharOffset = 0;
+                    let endCharOffset = -1;
+                    let currentWordIndexInDom = -1;
+                    
+                    for (const part of domTextParts) {
+                        const isWord = /\S/.test(part); // Is it a word or just whitespace?
+                        if (isWord) {
+                            currentWordIndexInDom++;
+                        }
+
+                        if (currentWordIndexInDom === wordIndexInOriginalData) {
+                            // This is the word we want to highlight
+                            endCharOffset = startCharOffset + part.length;
+                            break; // We found our word and its offsets
+                        }
+                        
+                        startCharOffset += part.length;
+                    }
+
+                    if (endCharOffset !== -1) {
+                        // We found the Nth word in the DOM. Highlight it.
+                        const wrapRange = (element, start, end) => {
+                            const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT, null, false);
+                            let charCount = 0;
+                            let startNode, endNode, startOffset, endOffset;
+
+                            while (walker.nextNode()) {
+                                const node = walker.currentNode;
+                                // Ignore text nodes inside our own dynamic highlights or search highlights
+                                if ($(node.parentElement).hasClass('active-word') || $(node.parentElement).hasClass('search-highlight')) {
+                                    continue;
+                                }
+                                
+                                const nodeLength = node.nodeValue.length;
+
+                                if (startNode === undefined && start < charCount + nodeLength) {
+                                    startNode = node;
+                                    startOffset = start - charCount;
+                                }
+                                if (endNode === undefined && end <= charCount + nodeLength) {
+                                    endNode = node;
+                                    endOffset = end - charCount;
+                                    break;
+                                }
+                                charCount += nodeLength;
+                            }
+
+                            if (startNode && endNode) {
+                                const range = document.createRange();
+                                range.setStart(startNode, startOffset);
+                                range.setEnd(endNode, endOffset);
+                                
+                                const span = document.createElement('span');
+                                span.className = 'word active-word';
+                                try {
+                                    range.surroundContents(span);
+                                    self.dynamicHighlightSpan = span;
+                                } catch (e) {
+                                    // Range invalid (e.g., spans across highlight boundaries), ignore
+                                }
+                            }
+                        };
+                        
+                        wrapRange($textElement[0], startCharOffset, endCharOffset);
+                    }
+                    // --- END: FIX ---
                 }
             }
 
@@ -1885,6 +1934,7 @@ handleTextSelection(e) {
             this.$translationContent.html('<div class="loading-state"><p>Select a language.</p></div>');
         }
 
+       // REPLACE the entire translateTranscript function with this one:
         translateTranscript(targetLang) {
             if (!targetLang) {
                 this.showNotification('Select a language.', 'warning');
@@ -1902,11 +1952,44 @@ handleTextSelection(e) {
                 nonce: this.nonce
             })
             .done(res => {
-                if (res.success) {
-                    const text = this.escapeHtml(res.data.translated_text);
-                    const paragraphs = text.split('\n').filter(p => p.trim())
-                        .map(p => `<p>${p}</p>`).join('');
-                    this.$translationContent.html(paragraphs || `<p>${text}</p>`);
+                if (res.success && res.data.translated_utterances) {
+                    // --- START NEW LOGIC ---
+                    const utterances = res.data.translated_utterances;
+                    if (utterances.length === 0) {
+                        this.$translationContent.html('<p>No content to translate.</p>');
+                        return;
+                    }
+
+                    // Get speaker colors (using the original utterances)
+                    const speakerColors = this.generateSpeakerColors(this.transcriptData.data.utterances);
+                    let html = '';
+
+                    utterances.forEach((utterance, index) => {
+                        const originalSpeaker = utterance.speaker || 'A';
+                        const displaySpeaker = utterance.display_speaker; // Get display name from server
+                        const utteranceTimestamp = this.formatTime(utterance.start / 1000);
+                        const textHtml = this.escapeHtml(utterance.text); // Just escape the translated text
+
+                        html += `
+                            <div class="utterance-row" data-index="${index}" data-start="${utterance.start}" 
+                                 data-end="${utterance.end}" data-original-speaker="${this.escapeHtml(originalSpeaker)}">
+                                <div class="utterance-header">
+                                    <div class="speaker-info">
+                                        <span class="speaker-avatar" data-speaker="${this.escapeHtml(originalSpeaker)}" 
+                                              style="background-color: ${speakerColors[originalSpeaker]}">${this.escapeHtml(displaySpeaker.charAt(0).toUpperCase())}</span>
+                                        <span class="speaker-label" data-speaker="${this.escapeHtml(originalSpeaker)}">
+                                            ${this.escapeHtml(displaySpeaker)}
+                                        </span>
+                                    </div>
+                                    <span class="utterance-timestamp">${this.escapeHtml(utteranceTimestamp)}</span>
+                                </div>
+                                <p class="utterance-text" contenteditable="false">${textHtml.trim()}</p>
+                            </div>`;
+                    });
+                    
+                    this.$translationContent.html(html);
+                    // --- END NEW LOGIC ---
+
                 } else {
                     this.$translationContent.html(`<div class="error-message">${this.escapeHtml(res.data || 'Translation failed')}</div>`);
                 }
@@ -1915,7 +1998,7 @@ handleTextSelection(e) {
                 this.$translationContent.html('<div class="error-message">Network error.</div>');
             });
         }
-
+        
         hideTranslation() {
             this.$translationWrapper.hide();
             $('#transcript-area-container').removeClass('translation-active');
