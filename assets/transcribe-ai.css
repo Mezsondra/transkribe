@@ -325,7 +325,6 @@
     margin-left: 0.25rem;
 }
 
-.copy-dropdown-container.has-translation #copyTranscriptBtn .dropdown-arrow,
 .copy-dropdown-container #copyTranscriptBtn.has-dropdown .dropdown-arrow {
     display: inline-flex;
 }
