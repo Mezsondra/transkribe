@@ -715,7 +715,7 @@ class Transcribe_AI_Ajax {
     public static function init() {
         $actions = [
             'start_transcription', 'check_transcription', 'get_transcript_data',
-            'save_transcript', 'delete_transcript', 'export_transcript', 
+            'save_transcript', 'save_speaker_map', 'delete_transcript', 'export_transcript',
             'translate_transcript', 'update_transcript_title', 'generate_summary',
             'save_highlight', 'delete_highlight', 'get_highlights'
         ];
