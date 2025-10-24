@@ -2064,6 +2064,7 @@ private static function hex_to_rgb($hex) {
     }
 
     // FIX #10: Improved translation with better chunking for long utterances
+// REPLACE the entire translate_transcript function with this:
     public static function translate_transcript() {
         if (!check_ajax_referer('transcribe_ai_nonce', 'nonce', false)) {
             wp_send_json_error('Invalid security token');
@@ -2091,78 +2092,54 @@ private static function hex_to_rgb($hex) {
             wp_send_json_error('No text to translate.');
         }
         
-        if (!$speaker_map) {
-            $speaker_map = get_post_meta($transcript_id, '_speaker_map', true) ?: [];
-        }
-        
         $utterances = $transcript_data['utterances'];
-        $chunks = [];
-        $current_chunk = '';
         
+        // --- START NEW LOGIC ---
+        
+        // 1. Collect all texts to be translated
+        $texts_to_translate = [];
         foreach ($utterances as $utterance) {
-            $speaker = isset($utterance['speaker']) ? $utterance['speaker'] : 'Unknown';
-            $display_speaker = isset($speaker_map[$speaker]) ? $speaker_map[$speaker] : $speaker;
-$text_line = "[" . $display_speaker . "]: " . $utterance['text'] . "\n\n";            
-            // FIX #10: Handle individual utterances that exceed limit
-            if (mb_strlen($text_line) > TRANSCRIBE_AI_CHUNK_LIMIT) {
-                // Split long utterance at sentence boundaries
-                if (!empty($current_chunk)) {
-                    $chunks[] = $current_chunk;
-                    $current_chunk = '';
-                }
-                
-                $sentences = preg_split('/([.!?]+\s+)/', $utterance['text'], -1, PREG_SPLIT_DELIM_CAPTURE);
-                $temp_chunk = "[Speaker " . $display_speaker . "]: ";
-                
-                for ($i = 0; $i < count($sentences); $i++) {
-                    $sentence = $sentences[$i];
-                    if (mb_strlen($temp_chunk . $sentence) > TRANSCRIBE_AI_CHUNK_LIMIT) {
-                        if (!empty($temp_chunk)) {
-                            $chunks[] = $temp_chunk . "\n\n";
-                        }
-                        $temp_chunk = "[Speaker " . $display_speaker . "]: " . $sentence;
-                    } else {
-                        $temp_chunk .= $sentence;
-                    }
-                }
-                
-                if (!empty($temp_chunk)) {
-                    $current_chunk = $temp_chunk . "\n\n";
-                }
-            } elseif (mb_strlen($current_chunk . $text_line) > TRANSCRIBE_AI_CHUNK_LIMIT) {
-                if (!empty($current_chunk)) {
-                    $chunks[] = $current_chunk;
-                }
-                $current_chunk = $text_line;
-            } else {
-                $current_chunk .= $text_line;
-            }
+            // If the text was edited, it contains highlight markers. Strip them before translating.
+            $clean_text = preg_replace('/\[\[HIGHLIGHT color="[^"]+"\]\](.*?)\[\[\/HIGHLIGHT\]\]/', '$1', $utterance['text']);
+            $texts_to_translate[] = $clean_text;
         }
-        
-        if (!empty($current_chunk)) {
-            $chunks[] = $current_chunk;
+
+        if (empty($texts_to_translate)) {
+            wp_send_json_error('No text to translate.');
         }
-        
-        // Translate each chunk
-        $translated_parts = [];
-        foreach ($chunks as $chunk) {
+
+        // 2. Batch translation requests (DeepL free limit is 50 texts per request)
+        $text_batches = array_chunk($texts_to_translate, 50);
+        $all_translated_texts = [];
+
+        foreach ($text_batches as $batch) {
             $ch = curl_init();
             
-            $data = http_build_query([
-                'text' => trim($chunk),
-                'target_lang' => $target_lang
-            ]);
+            // --- START: THIS IS THE FIX ---
+            // Manually build the 'text=...' query parts
+            $post_data = [];
+            foreach ($batch as $text_item) {
+                $post_data[] = 'text=' . urlencode($text_item);
+            }
+
+            // Add the other parameters
+            $post_data[] = 'target_lang=' . urlencode($target_lang);
+            $post_data[] = 'tag_handling=' . urlencode('xml');
+
+            // Join all parts with '&'
+            $data = implode('&', $post_data);
+            // --- END: THIS IS THE FIX ---
             
             curl_setopt_array($ch, [
                 CURLOPT_URL => 'https://api-free.deepl.com/v2/translate',
                 CURLOPT_RETURNTRANSFER => true, 
                 CURLOPT_POST => true,
-                CURLOPT_POSTFIELDS => $data,
+                CURLOPT_POSTFIELDS => $data, // <-- Pass the correctly formatted string
                 CURLOPT_HTTPHEADER => [
                     'Authorization: DeepL-Auth-Key ' . $api_key,
                     'Content-Type: application/x-www-form-urlencoded'
                 ],
-                CURLOPT_TIMEOUT => 30
+                CURLOPT_TIMEOUT => 60 // Increased timeout for batch
             ]);
             
             $response = curl_exec($ch);
@@ -2188,19 +2165,44 @@ $text_line = "[" . $display_speaker . "]: " . $utterance['text'] . "\n\n";
             }
             
             $response_data = json_decode($response, true);
-            if (!$response_data || !isset($response_data['translations'][0]['text'])) {
+            if (!$response_data || !isset($response_data['translations'])) {
                 wp_send_json_error('Invalid translation response.');
                 return;
             }
             
-            $translated_parts[] = $response_data['translations'][0]['text'];
+            // Add the translated texts from this batch to our master list
+            foreach ($response_data['translations'] as $translation) {
+                $all_translated_texts[] = $translation['text'];
+            }
         }
         
-        $translated_text = implode("\n\n", $translated_parts);
+        // 3. Reconstruct the utterance array with translated text
+        $translated_utterances = [];
         
-        wp_send_json_success(['translated_text' => $translated_text]);
+        // Get the speaker map to apply display names
+        if (!$speaker_map) {
+            $speaker_map = get_post_meta($transcript_id, '_speaker_map', true) ?: [];
+        }
+
+        foreach ($utterances as $index => $utterance) {
+            $original_speaker = $utterance['speaker'] ?? 'A';
+            // Use the passed-in speaker map first, fallback to saved map
+            $display_speaker = $speaker_map[$original_speaker] ?? (get_post_meta($transcript_id, '_speaker_map', true)[$original_speaker] ?? 'Speaker ' . $original_speaker);
+
+            $translated_utterances[] = [
+                'start' => $utterance['start'],
+                'end' => $utterance['end'],
+                'speaker' => $original_speaker, // Send the original speaker ID
+                'display_speaker' => $display_speaker, // Send the display name
+                'text' => $all_translated_texts[$index] ?? '[Translation Error]'
+            ];
+        }
+
+        // Send the structured array, not a single text block
+        wp_send_json_success(['translated_utterances' => $translated_utterances]);
+        // --- END NEW LOGIC ---
     }
-    
+        
     public static function generate_summary() {
         if (!check_ajax_referer('transcribe_ai_nonce', 'nonce', false)) {
             wp_send_json_error('Invalid security token');

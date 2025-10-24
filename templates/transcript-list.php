@@ -189,7 +189,9 @@ foreach ($transcripts as $transcript) {
                 <?php
                 // This creates a base URL that preserves other query args (like sorting, etc.)
                 global $wp;
-                $base_url = remove_query_arg('paged', home_url(add_query_arg(array(), $wp->request)));                // Previous button
+                $base_url = remove_query_arg('paged', home_url(add_query_arg(array(), $wp->request)));
+
+                // Previous button
                 if ($current_page > 1): ?>
                     <a href="<?php echo add_query_arg('paged', $current_page - 1, $base_url); ?>" class="pagination-prev">
                         <span class="material-symbols-outlined">chevron_left</span>
