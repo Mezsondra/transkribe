@@ -2691,6 +2691,9 @@ handleTextSelection(e) {
             const includeSpeakers = $modal.find('#includeSpeakers').is(':checked');
             const includeHighlights = $modal.find('#includeHighlights').is(':checked');
             const paragraphMode = $modal.find('input[name="paragraphMode"]:checked').val() || 'utterance';
+            const timestampMode = includeTimestamps
+                ? (this.currentTimestampMode || 'utterance')
+                : 'none';
             
             // Apply speaker map to export data
             const exportData = JSON.parse(JSON.stringify(this.transcriptData.data));
@@ -2709,6 +2712,7 @@ handleTextSelection(e) {
                 transcript_id: this.transcriptId,
                 format: format,
                 include_timestamps: includeTimestamps,
+                timestamp_mode: timestampMode,
                 include_speakers: includeSpeakers,
                 include_highlights: includeHighlights,
                 paragraph_mode: paragraphMode,
