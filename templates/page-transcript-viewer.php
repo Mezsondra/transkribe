@@ -144,7 +144,7 @@
                     </div>
 
                     <div id="copyDropdown" class="control-dropdown-container copy-dropdown-container">
-                        <button id="copyTranscriptBtn" class="control-btn" aria-label="<?php esc_attr_e('Copy transcript to clipboard', 'transcribe-ai'); ?>">
+                        <button id="copyTranscriptBtn" type="button" class="control-btn" aria-label="<?php esc_attr_e('Copy transcript to clipboard', 'transcribe-ai'); ?>">
                             <span class="material-symbols-outlined">save</span>
                             <span><?php _e('Copy', 'transcribe-ai'); ?></span>
                             <span class="material-symbols-outlined dropdown-arrow" aria-hidden="true">arrow_drop_down</span>

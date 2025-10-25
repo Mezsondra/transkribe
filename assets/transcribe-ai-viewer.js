@@ -140,6 +140,15 @@
             this.$copyMenu = $('#copyMenu');
             this.$copyTranslationOption = this.$copyMenu.find('.translation-option');
 
+            if (this.$copyMenu && this.$copyMenu.length) {
+                this.$copyMenu.attr('aria-hidden', 'true');
+            }
+
+            const $copyArrow = this.$copyBtn.find('.dropdown-arrow');
+            if ($copyArrow.length) {
+                $copyArrow.attr('aria-hidden', 'true');
+            }
+
             this.updateCopyButtonState();
         }
 
@@ -538,75 +547,57 @@ this.$transcriptContent.on('click', '.utterance-text', e => {
             let html = '';
             
             utterances.forEach((utterance, index) => {
-               // This is the new, corrected code
-const originalSpeaker = utterance.speaker || 'A';
-let displaySpeaker = this.speakerMap[originalSpeaker];
+                const originalSpeaker = utterance.speaker || 'A';
+                let displaySpeaker = this.speakerMap[originalSpeaker];
 
-// If a name for this speaker ID doesn't exist yet...
-if (!displaySpeaker) {
-    // ...create a default one (e.g., "Speaker A")
-    displaySpeaker = `Speaker ${originalSpeaker}`;
-    // And add it to our map so it can be saved later
-    this.speakerMap[originalSpeaker] = displaySpeaker;
-}
+                if (!displaySpeaker) {
+                    displaySpeaker = `Speaker ${originalSpeaker}`;
+                    this.speakerMap[originalSpeaker] = displaySpeaker;
+                }
 
-const utteranceTimestamp = this.formatTime(utterance.start / 1000);
-// In the renderTranscript() function in transcribe-ai-viewer.js...
-// Find the block that starts with "let textHtml = '';"
+                const utteranceTimestamp = this.formatTime(utterance.start / 1000);
+                const hasWordData = Array.isArray(utterance.words) && utterance.words.length > 0;
 
-// REPLACE that entire block with this new, smarter logic:
+                let textHtml = '';
 
-let textHtml = '';
+                if (utterance.is_edited && utterance.text) {
+                    textHtml = this.buildEditedUtteranceHtml(utterance);
+                }
 
-// Use the 'is_edited' flag to decide how to render the text.
-// This is the key to the fix. It also includes a fallback for older data.
-if (utterance.is_edited || !utterance.words || utterance.words.length === 0) {
-    // STATE 1: Text has been EDITED.
-    // Render from the saved 'text' property and parse for highlight markers.
-    const parts = utterance.text.split(/(\[\[HIGHLIGHT color="[^"]+"\]\].*?\[\[\/HIGHLIGHT\]\])/g);
-    textHtml = parts.map(part => {
-        if (!part) return '';
-        const match = /\[\[HIGHLIGHT color="([^"]+)"\]\](.*?)\[\[\/HIGHLIGHT\]\]/.exec(part);
-        if (match) {
-            const color = match[1];
-            const text = match[2];
-            return `<mark style="background-color: ${this.escapeHtml(color)};">${this.escapeHtml(text)}</mark>`;
-        } else {
-            return this.escapeHtml(part);
-        }
-    }).join('');
+                if (!textHtml) {
+                    if (hasWordData) {
+                        let isNewSentence = true;
+                        utterance.words.forEach(word => {
+                            if (isNewSentence) {
+                                const sentenceTimestamp = this.formatTime((word.start || utterance.start || 0) / 1000);
+                                textHtml += `<span class="sentence-timestamp">[${sentenceTimestamp}]</span> `;
+                                isNewSentence = false;
+                            }
+                            textHtml += `<span class="word" data-start="${word.start}" data-end="${word.end}">${this.escapeHtml(word.text)}</span> `;
+                            if (word.text && /[.?!]$/.test(word.text)) {
+                                isNewSentence = true;
+                            }
+                        });
+                    } else if (utterance.text) {
+                        textHtml = this.renderTokensToHtml(this.tokenizeUtteranceText(utterance.text));
+                    }
+                }
 
-} else {
-    // STATE 2: Text is ORIGINAL.
-    // Render by looping through the 'words' array to create clickable spans.
-    let isNewSentence = true;
-    utterance.words.forEach(word => {
-        if (isNewSentence) {
-            const sentenceTimestamp = this.formatTime(word.start / 1000);
-            textHtml += `<span class="sentence-timestamp">[${sentenceTimestamp}]</span> `;
-            isNewSentence = false;
-        }
-        textHtml += `<span class="word" data-start="${word.start}" data-end="${word.end}">${this.escapeHtml(word.text)}</span> `;
-        if (/[.?!]$/.test(word.text)) {
-            isNewSentence = true;
-        }
-    });
-}
+                textHtml = textHtml.trim();
 
-// +++ END: THIS IS THE NEW, CORRECTED CODE +++
                 html += `
-                    <div class="utterance-row" data-index="${index}" data-start="${utterance.start}" 
+                    <div class="utterance-row" data-index="${index}" data-start="${utterance.start}"
                          data-end="${utterance.end}" data-original-speaker="${this.escapeHtml(originalSpeaker)}">
                         <div class="utterance-header">
                             <div class="speaker-info">
-                                <span class="speaker-avatar" data-speaker="${this.escapeHtml(originalSpeaker)}" 
+                                <span class="speaker-avatar" data-speaker="${this.escapeHtml(originalSpeaker)}"
                                       style="background-color: ${speakerColors[originalSpeaker]}">${this.escapeHtml(displaySpeaker.charAt(0).toUpperCase())}</span>
-                                <span class="speaker-label" data-speaker="${this.escapeHtml(originalSpeaker)}" 
+                                <span class="speaker-label" data-speaker="${this.escapeHtml(originalSpeaker)}"
                                       title="Click to edit speaker name">${this.escapeHtml(displaySpeaker)}</span>
                             </div>
                             <span class="utterance-timestamp">${this.escapeHtml(utteranceTimestamp)}</span>
                         </div>
-                        <p class="utterance-text" contenteditable="false">${textHtml.trim()}</p>
+                        <p class="utterance-text" contenteditable="false">${textHtml}</p>
                     </div>`;
             });
             
@@ -615,9 +606,186 @@ if (utterance.is_edited || !utterance.words || utterance.words.length === 0) {
             this.setTimestampView('utterance');
         }
 
+        buildEditedUtteranceHtml(utterance) {
+            const tokens = this.tokenizeUtteranceText(utterance.text);
+            const timestamps = this.extractSentenceTimestamps(utterance);
+
+            if (tokens.length === 0) {
+                return '';
+            }
+
+            const sentences = this.splitTokensIntoSentences(tokens);
+
+            if (sentences.length === 0) {
+                const fallback = this.renderTokensToHtml(tokens);
+                if (!fallback) return '';
+                const primaryTimestamp = timestamps[0];
+                return primaryTimestamp ? `<span class="sentence-timestamp">[${primaryTimestamp}]</span> ${fallback}` : fallback;
+            }
+
+            return sentences.map((sentenceTokens, idx) => {
+                const sentenceHtml = this.renderTokensToHtml(sentenceTokens).trim();
+                if (!sentenceHtml) return '';
+                const timestamp = timestamps[Math.min(idx, timestamps.length - 1)];
+                const prefix = timestamp ? `<span class="sentence-timestamp">[${timestamp}]</span> ` : '';
+                return `${prefix}${sentenceHtml}`;
+            }).filter(Boolean).join(' ');
+        }
+
+        tokenizeUtteranceText(text) {
+            if (!text) return [];
+
+            const tokens = [];
+            const highlightRegex = /\[\[HIGHLIGHT color="([^"]+)"\]\]([\s\S]*?)\[\[\/HIGHLIGHT\]\]/g;
+            let lastIndex = 0;
+            let match;
+
+            while ((match = highlightRegex.exec(text)) !== null) {
+                if (match.index > lastIndex) {
+                    tokens.push({ type: 'text', text: text.slice(lastIndex, match.index) });
+                }
+
+                tokens.push({ type: 'highlight', color: match[1], text: match[2] });
+                lastIndex = match.index + match[0].length;
+            }
+
+            if (lastIndex < text.length) {
+                tokens.push({ type: 'text', text: text.slice(lastIndex) });
+            }
+
+            return tokens;
+        }
+
+        splitTokensIntoSentences(tokens) {
+            const sentences = [];
+            let current = [];
+
+            tokens.forEach(token => {
+                let remaining = token.text || '';
+
+                while (remaining.length > 0) {
+                    const punctuationIndex = remaining.search(/[.?!]/);
+
+                    if (punctuationIndex === -1) {
+                        current.push(this.cloneTokenWithText(token, remaining));
+                        remaining = '';
+                        break;
+                    }
+
+                    const cutoff = punctuationIndex + 1;
+                    const leading = remaining.slice(0, cutoff);
+
+                    if (leading) {
+                        current.push(this.cloneTokenWithText(token, leading));
+                    }
+
+                    sentences.push(this.normalizeSentenceTokens(current));
+                    current = [];
+
+                    remaining = remaining.slice(cutoff);
+
+                    const whitespaceMatch = remaining.match(/^\s+/);
+                    if (whitespaceMatch) {
+                        remaining = remaining.slice(whitespaceMatch[0].length);
+                    }
+                }
+            });
+
+            if (current.length) {
+                sentences.push(this.normalizeSentenceTokens(current));
+            }
+
+            return sentences.filter(sentence => sentence.length > 0);
+        }
+
+        cloneTokenWithText(token, text) {
+            if (!text) return null;
+            if (token.type === 'highlight') {
+                return { type: 'highlight', color: token.color, text: text };
+            }
+            return { type: 'text', text: text };
+        }
+
+        normalizeSentenceTokens(tokens) {
+            const normalized = [];
+            let leadingTrimmed = false;
+
+            tokens.forEach(token => {
+                if (!token) return;
+                let text = token.text || '';
+
+                if (!leadingTrimmed) {
+                    const trimmed = text.replace(/^\s+/, '');
+                    leadingTrimmed = trimmed.length > 0 || text.length === 0;
+                    text = trimmed;
+                }
+
+                if (!text.length) {
+                    return;
+                }
+
+                normalized.push(token.type === 'highlight'
+                    ? { type: 'highlight', color: token.color, text: text }
+                    : { type: 'text', text: text }
+                );
+            });
+
+            return normalized;
+        }
+
+        renderTokensToHtml(tokens) {
+            if (!Array.isArray(tokens)) return '';
+
+            return tokens.map(token => {
+                if (!token || !token.text) {
+                    return '';
+                }
+
+                if (token.type === 'highlight') {
+                    const color = token.color ? this.escapeHtml(token.color) : '#ffeb3b';
+                    return `<mark style="background-color: ${color};">${this.escapeHtml(token.text)}</mark>`;
+                }
+
+                return this.escapeHtml(token.text);
+            }).join('');
+        }
+
+        extractSentenceTimestamps(utterance) {
+            if (!utterance) return [];
+
+            if (Array.isArray(utterance.sentence_timestamps) && utterance.sentence_timestamps.length) {
+                return utterance.sentence_timestamps;
+            }
+
+            const timestamps = [];
+            const words = Array.isArray(utterance.words) ? utterance.words : [];
+            let isNewSentence = true;
+
+            words.forEach(word => {
+                if (!word) return;
+
+                if (isNewSentence) {
+                    const startMs = typeof word.start === 'number' ? word.start : (utterance.start || 0);
+                    timestamps.push(this.formatTime(startMs / 1000));
+                    isNewSentence = false;
+                }
+
+                if (word.text && /[.?!]$/.test(word.text.trim())) {
+                    isNewSentence = true;
+                }
+            });
+
+            if (!timestamps.length && typeof utterance.start === 'number') {
+                timestamps.push(this.formatTime(utterance.start / 1000));
+            }
+
+            utterance.sentence_timestamps = timestamps;
+            return timestamps;
+        }
+
         buildSearchIndex() {
             this.searchIndex = [];
-            
+
             this.$transcriptContent.find('.utterance-row').each((index, element) => {
                 const $element = $(element);
                 const text = $element.find('.utterance-text').text()
@@ -674,10 +842,11 @@ if (utterance.is_edited || !utterance.words || utterance.words.length === 0) {
         handleCopyButtonClick(e) {
             if (!this.$copyBtn || !this.$copyBtn.length) return;
 
+            e.preventDefault();
+
             const clickedArrow = $(e.target).closest('.dropdown-arrow').length > 0;
 
             if (this.isTranslationVisible() && clickedArrow) {
-                e.preventDefault();
                 e.stopPropagation();
                 this.toggleCopyMenu();
                 return;
@@ -713,11 +882,12 @@ if (utterance.is_edited || !utterance.words || utterance.words.length === 0) {
                 : !this.$copyMenu.hasClass('open');
 
             this.$copyMenu.toggleClass('open', shouldOpen);
+            this.$copyMenu.attr('aria-hidden', shouldOpen ? 'false' : 'true');
             this.updateCopyButtonState();
         }
 
         copyTranscriptText(target = 'original') {
-            const { text, error } = this.getCopyText(target);
+            const { text, html, error } = this.getCopyContent(target);
 
             if (!text) {
                 if (error) {
@@ -726,7 +896,7 @@ if (utterance.is_edited || !utterance.words || utterance.words.length === 0) {
                 return;
             }
 
-            this.copyToClipboard(text)
+            this.copyToClipboard({ text, html })
                 .then(() => {
                     const label = target === 'translation' ? 'Translation' : 'Transcript';
                     this.showNotification(`${label} copied to clipboard.`, 'success');
@@ -736,7 +906,7 @@ if (utterance.is_edited || !utterance.words || utterance.words.length === 0) {
                 });
         }
 
-        getCopyText(target) {
+        getCopyContent(target) {
             const options = {
                 includeUtteranceTimestamps: false,
                 includeSentenceTimestamps: false
@@ -762,18 +932,22 @@ if (utterance.is_edited || !utterance.words || utterance.words.length === 0) {
                 options.includeSentenceTimestamps = this.currentTimestampMode === 'sentence';
             }
 
-            const text = this.buildCopyTextFromContainer($container, options);
+            const { text, html } = this.buildCopyContentFromContainer($container, options);
 
             return {
                 text,
+                html,
                 error: text ? null : 'Nothing to copy.'
             };
         }
 
-        buildCopyTextFromContainer($container, options = {}) {
-            if (!$container || !$container.length) return '';
+        buildCopyContentFromContainer($container, options = {}) {
+            if (!$container || !$container.length) {
+                return { text: '', html: '' };
+            }
 
             const lines = [];
+            const htmlLines = [];
 
             $container.find('.utterance-row').each((index, row) => {
                 const $row = $(row);
@@ -784,25 +958,37 @@ if (utterance.is_edited || !utterance.words || utterance.words.length === 0) {
                 if (!text) return;
 
                 const parts = [];
+                const htmlParts = [];
 
                 if (options.includeUtteranceTimestamps && timestamp) {
                     parts.push(`[${timestamp}]`);
+                    htmlParts.push(`<span>[${this.escapeHtml(timestamp)}]</span>`);
                 }
 
                 if (speaker) {
-                    parts.push(`${speaker}:`);
+                    parts.push(`**${speaker}**:`);
+                    htmlParts.push(`<strong>${this.escapeHtml(speaker)}</strong>:`);
                 }
 
                 parts.push(text);
+                htmlParts.push(this.escapeHtml(text));
 
                 const line = this.normalizeCopiedText(parts.join(' '));
+                const htmlLine = this.normalizeCopiedText(htmlParts.join(' '));
 
                 if (line) {
                     lines.push(line);
                 }
+
+                if (htmlLine) {
+                    htmlLines.push(`<p>${htmlLine}</p>`);
+                }
             });
 
-            return lines.join('\n');
+            return {
+                text: lines.join('\n\n'),
+                html: htmlLines.join('')
+            };
         }
 
         extractUtteranceTextForCopy($element, includeSentenceTimestamps = false) {
@@ -824,40 +1010,128 @@ if (utterance.is_edited || !utterance.words || utterance.words.length === 0) {
             return text.replace(/\s+/g, ' ').trim();
         }
 
-        copyToClipboard(text) {
-            if (!text) return Promise.resolve();
+        copyToClipboard({ text, html }) {
+            const plainText = text || '';
+            const htmlText = html || '';
 
-            if (navigator.clipboard && window.isSecureContext) {
-                return navigator.clipboard.writeText(text);
+            if (!plainText && !htmlText) {
+                return Promise.resolve();
             }
 
-            return new Promise((resolve, reject) => {
-                const textarea = document.createElement('textarea');
-                textarea.value = text;
-                textarea.setAttribute('readonly', '');
-                textarea.style.position = 'absolute';
-                textarea.style.left = '-9999px';
-                document.body.appendChild(textarea);
-                textarea.select();
-                textarea.setSelectionRange(0, textarea.value.length);
+            const fallbackCopy = () => new Promise((resolve, reject) => {
+                const activeElement = document.activeElement;
+                const selection = window.getSelection && window.getSelection();
+                let previousRange = null;
+                if (selection && selection.rangeCount > 0) {
+                    previousRange = selection.getRangeAt(0).cloneRange();
+                }
+
+                const useHtmlFallback = Boolean(htmlText);
+                const container = useHtmlFallback ? document.createElement('div') : document.createElement('textarea');
+
+                if (useHtmlFallback) {
+                    container.innerHTML = htmlText;
+                    container.setAttribute('contenteditable', 'true');
+                    container.style.whiteSpace = 'pre-wrap';
+                } else {
+                    container.value = plainText;
+                    container.setAttribute('readonly', '');
+                }
+
+                container.style.position = 'fixed';
+                container.style.top = '-9999px';
+                container.style.left = '-9999px';
+                container.style.opacity = '0';
+
+                document.body.appendChild(container);
+
+                if (useHtmlFallback) {
+                    const range = document.createRange();
+                    range.selectNodeContents(container);
+                    if (selection) {
+                        selection.removeAllRanges();
+                        selection.addRange(range);
+                    }
+                    container.focus();
+                } else {
+                    container.focus();
+                    container.select();
+                    container.setSelectionRange(0, container.value.length);
+                }
 
                 try {
                     const successful = document.execCommand('copy');
-                    document.body.removeChild(textarea);
+                    document.body.removeChild(container);
+
+                    if (selection) {
+                        selection.removeAllRanges();
+                        if (previousRange) {
+                            selection.addRange(previousRange);
+                        }
+                    }
+
+                    if (activeElement && typeof activeElement.focus === 'function') {
+                        activeElement.focus();
+                    }
+
                     if (successful) {
                         resolve();
                     } else {
                         reject();
                     }
                 } catch (error) {
-                    document.body.removeChild(textarea);
+                    document.body.removeChild(container);
+
+                    if (selection) {
+                        selection.removeAllRanges();
+                        if (previousRange) {
+                            selection.addRange(previousRange);
+                        }
+                    }
+
+                    if (activeElement && typeof activeElement.focus === 'function') {
+                        activeElement.focus();
+                    }
+
                     reject(error);
                 }
             });
+
+            if (navigator.clipboard && window.isSecureContext) {
+                if (htmlText && typeof navigator.clipboard.write === 'function' && window.ClipboardItem) {
+                    const items = {
+                        'text/plain': new Blob([plainText], { type: 'text/plain' })
+                    };
+
+                    if (htmlText) {
+                        items['text/html'] = new Blob([htmlText], { type: 'text/html' });
+                    }
+
+                    const clipboardItem = new ClipboardItem(items);
+
+                    return navigator.clipboard.write([clipboardItem]).catch(() => fallbackCopy());
+                }
+
+                if (typeof navigator.clipboard.writeText === 'function') {
+                    return navigator.clipboard.writeText(plainText).catch(() => fallbackCopy());
+                }
+            }
+
+            return fallbackCopy();
         }
 
         isTranslationVisible() {
             return this.$translationWrapper && this.$translationWrapper.is(':visible');
+        }
+
+        escapeHtml(text) {
+            if (text == null) return '';
+            return text
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
         }
 
         isTranslationCopyAvailable() {
@@ -882,11 +1156,15 @@ if (utterance.is_edited || !utterance.words || utterance.words.length === 0) {
                 if (this.$copyDropdown && this.$copyDropdown.length) {
                     this.$copyDropdown.addClass('has-translation');
                 }
+                if (this.$copyMenu && this.$copyMenu.length) {
+                    this.$copyMenu.attr('aria-hidden', menuIsOpen ? 'false' : 'true');
+                }
             } else {
                 this.$copyBtn.removeAttr('aria-haspopup');
                 this.$copyBtn.removeAttr('aria-expanded');
                 if (this.$copyMenu && this.$copyMenu.length) {
                     this.$copyMenu.removeClass('open');
+                    this.$copyMenu.attr('aria-hidden', 'true');
                 }
                 if (this.$copyDropdown && this.$copyDropdown.length) {
                     this.$copyDropdown.removeClass('has-translation');
