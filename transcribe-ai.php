@@ -375,9 +375,22 @@ class Transcribe_AI {
         ];
         
         $content_type = isset($content_types[$extension]) ? $content_types[$extension] : 'application/octet-stream';
-        
+
+        $display_name = '';
+        if (isset($_GET['display'])) {
+            $encoded = sanitize_text_field(wp_unslash($_GET['display']));
+            $decoded = base64_decode(rawurldecode($encoded));
+            if (is_string($decoded) && $decoded !== '') {
+                $display_name = self::sanitize_download_filename($decoded, $extension);
+            }
+        }
+
+        if ($display_name === '') {
+            $display_name = self::sanitize_download_filename($file, $extension);
+        }
+
         header('Content-Type: ' . $content_type);
-        header('Content-Disposition: attachment; filename="' . basename($filepath) . '"');
+        header('Content-Disposition: attachment; filename="' . $display_name . '"; filename*=UTF-8\'\'' . rawurlencode($display_name));
         header('Content-Length: ' . filesize($filepath));
         header('Cache-Control: no-cache, no-store, must-revalidate');
         header('Pragma: no-cache');
@@ -715,7 +728,7 @@ class Transcribe_AI_Ajax {
     public static function init() {
         $actions = [
             'start_transcription', 'check_transcription', 'get_transcript_data',
-            'save_transcript', 'delete_transcript', 'export_transcript', 
+            'save_transcript', 'save_speaker_map', 'delete_transcript', 'export_transcript',
             'translate_transcript', 'update_transcript_title', 'generate_summary',
             'save_highlight', 'delete_highlight', 'get_highlights'
         ];
@@ -1334,10 +1347,26 @@ public static function save_transcript() {
 
         $transcript_id = isset($_POST['transcript_id']) ? absint($_POST['transcript_id']) : 0;
         $format = isset($_POST['format']) ? sanitize_text_field($_POST['format']) : 'txt';
+        $include_timestamps = isset($_POST['include_timestamps']) ? filter_var($_POST['include_timestamps'], FILTER_VALIDATE_BOOLEAN) : false;
         $include_speakers = isset($_POST['include_speakers']) ? filter_var($_POST['include_speakers'], FILTER_VALIDATE_BOOLEAN) : true;
         $include_highlights = isset($_POST['include_highlights']) ? filter_var($_POST['include_highlights'], FILTER_VALIDATE_BOOLEAN) : false;
         $timestamp_mode = isset($_POST['timestamp_mode']) ? sanitize_text_field($_POST['timestamp_mode']) : 'utterance';
         $paragraph_mode = isset($_POST['paragraph_mode']) ? sanitize_text_field($_POST['paragraph_mode']) : 'utterance';
+
+        $allowed_timestamp_modes = ['utterance', 'sentence', 'none'];
+        if (!in_array($timestamp_mode, $allowed_timestamp_modes, true)) {
+            $timestamp_mode = 'utterance';
+        }
+
+        if (!$include_timestamps || $timestamp_mode === 'none') {
+            $include_timestamps = false;
+            $timestamp_mode = 'none';
+        }
+
+        $allowed_paragraph_modes = ['utterance', 'speaker', 'continuous'];
+        if (!in_array($paragraph_mode, $allowed_paragraph_modes, true)) {
+            $paragraph_mode = 'utterance';
+        }
 
         if (!$transcript_id) {
             wp_send_json_error('Invalid transcript ID');
@@ -1361,16 +1390,16 @@ public static function save_transcript() {
 
         switch ($format) {
             case 'docx':
-                $result = self::export_as_docx($transcript_data, $title, $date, $timestamp_mode, $include_speakers, $paragraph_mode, $transcript_id, $include_highlights);
+                $result = self::export_as_docx($transcript_data, $title, $date, $include_timestamps, $timestamp_mode, $include_speakers, $paragraph_mode, $transcript_id, $include_highlights);
                 break;
             case 'pdf':
-                $result = self::export_as_pdf($transcript_data, $title, $date, $timestamp_mode, $include_speakers, $paragraph_mode, $transcript_id, $include_highlights);
+                $result = self::export_as_pdf($transcript_data, $title, $date, $include_timestamps, $timestamp_mode, $include_speakers, $paragraph_mode, $transcript_id, $include_highlights);
                 break;
             default:
-                $export_data = self::format_export($transcript_data, $format, $timestamp_mode, $include_speakers, $paragraph_mode);
+                $export_data = self::format_export($transcript_data, $format, $include_timestamps, $timestamp_mode, $include_speakers, $paragraph_mode);
                 $result = [
                     'content' => $export_data,
-                    'filename' => sanitize_file_name($title) . '.' . $format,
+                    'filename' => self::build_export_filename($title, $format),
                     'is_download_url' => false
                 ];
         }
@@ -1378,22 +1407,21 @@ public static function save_transcript() {
         wp_send_json_success($result);
     }
     
-    private static function format_export($data, $format, $timestamp_mode, $include_speakers, $paragraph_mode) {
+    private static function format_export($data, $format, $include_timestamps, $timestamp_mode, $include_speakers, $paragraph_mode) {
         switch ($format) {
-            case 'srt': 
+            case 'srt':
                 return self::format_as_srt($data);
-            case 'vtt': 
+            case 'vtt':
                 return self::format_as_vtt($data);
-            case 'json': 
+            case 'json':
                 return json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE);
             case 'txt':
             default:
-                return self::format_as_text($data, $timestamp_mode, $include_speakers, $paragraph_mode);
+                return self::format_as_text($data, $include_timestamps, $timestamp_mode, $include_speakers, $paragraph_mode);
         }
     }
-    
-    // FIX #3: Improved text formatting with better timestamp preservation
-    private static function format_as_text($data, $timestamp_mode = 'utterance', $include_speakers = true, $paragraph_mode = 'utterance') {
+
+    private static function format_as_text($data, $include_timestamps = false, $timestamp_mode = 'utterance', $include_speakers = true, $paragraph_mode = 'utterance') {
         $text = '';
         $utterances = isset($data['utterances']) ? $data['utterances'] : [];
 
@@ -1403,78 +1431,378 @@ public static function save_transcript() {
 
         $processed_utterances = [];
         foreach ($utterances as $utterance) {
-            $prefix = '';
-            if ($timestamp_mode === 'utterance') {
-                $prefix = '[' . self::ms_to_time($utterance['start']) . '] ';
-            }
-            if ($include_speakers && isset($utterance['speaker'])) {
-                $prefix .= $utterance['speaker'] . ': ';
+            $speaker = $utterance['speaker'] ?? '';
+            $clean_text = self::strip_highlight_markup($utterance['text'] ?? '');
+            $clean_text = self::normalize_export_segment_text($clean_text);
+
+            $effective_timestamp_mode = $include_timestamps ? $timestamp_mode : 'none';
+            $line_body = $clean_text;
+
+            if ($effective_timestamp_mode === 'sentence' && !empty($utterance['words'])) {
+                $sentences = self::build_sentence_chunks($utterance);
+                if (!empty($sentences)) {
+                    $parts = [];
+                    foreach ($sentences as $sentence) {
+                        $sentence_text = self::normalize_export_segment_text($sentence['text']);
+                        if ($sentence_text === '') {
+                            continue;
+                        }
+                        $parts[] = '[' . self::ms_to_time($sentence['start']) . '] ' . $sentence_text;
+                    }
+                    if (!empty($parts)) {
+                        $line_body = implode(' ', $parts);
+                    }
+                }
             }
 
-            $content = $utterance['text'];
-            if ($timestamp_mode === 'sentence' && !empty($utterance['words'])) {
-                $content = '';
-                $sentence_buffer = '';
-                $sentence_start_time = null;
-                
-                foreach ($utterance['words'] as $word) {
-                    if ($sentence_start_time === null) {
-                        $sentence_start_time = $word['start'];
-                    }
-                    
-                    $sentence_buffer .= $word['text'] . ' ';
-                    
-                    // Check if sentence ends
-                    if (preg_match('/[.?!]$/', $word['text'])) {
-                        $content .= '[' . self::ms_to_time($sentence_start_time) . '] ' . trim($sentence_buffer) . ' ';
-                        $sentence_buffer = '';
-                        $sentence_start_time = null;
-                    }
-                }
-                
-                // Add remaining buffer
-                if (!empty($sentence_buffer)) {
-                    if ($sentence_start_time !== null) {
-                        $content .= '[' . self::ms_to_time($sentence_start_time) . '] ';
-                    }
-                    $content .= trim($sentence_buffer);
-                }
+            $line_without_speaker = $line_body;
+            if ($effective_timestamp_mode === 'utterance' && isset($utterance['start'])) {
+                $line_without_speaker = '[' . self::ms_to_time($utterance['start']) . '] ' . $line_without_speaker;
+            }
+
+            $line_without_speaker = trim(preg_replace('/\s+/u', ' ', $line_without_speaker));
+
+            $line_with_speaker = $line_without_speaker;
+            if ($include_speakers && $speaker !== '') {
+                $line_with_speaker = $speaker . ': ' . $line_without_speaker;
             }
 
             $processed_utterances[] = [
-                'prefix' => $prefix,
-                'content' => trim($content),
-                'speaker' => $utterance['speaker'] ?? 'Unknown'
+                'line_with_speaker' => $line_with_speaker,
+                'line_without_speaker' => $line_without_speaker,
+                'speaker' => $speaker
             ];
         }
 
         if ($paragraph_mode === 'continuous') {
-            foreach ($processed_utterances as $p) {
-                $text .= $p['prefix'] . $p['content'] . ' ';
-            }
+            $lines = array_map(function ($p) {
+                return $p['line_with_speaker'];
+            }, $processed_utterances);
+            $text = implode(' ', array_filter(array_map('trim', $lines)));
         } elseif ($paragraph_mode === 'speaker') {
+            $paragraphs = [];
             $current_speaker = null;
-            $current_block = '';
-            foreach ($processed_utterances as $i => $p) {
-                if ($p['speaker'] !== $current_speaker) {
-                    if ($current_block !== '') {
-                        $text .= "\n" . trim($current_block) . "\n";
-                    }
-                    $current_speaker = $p['speaker'];
-                    $text .= "\n" . ($include_speakers ? 'Speaker ' . $p['speaker'] . ":\n" : '');
-                    $current_block = '';
+            $current_block = [];
+
+            $append_block = function($speaker, $block) use (&$paragraphs, $include_speakers) {
+                if (empty($block)) {
+                    return;
                 }
-                $line_content = ($timestamp_mode === 'utterance' ? '[' . self::ms_to_time($utterances[$i]['start']) . '] ' : '') . $p['content'];
-                $current_block .= $line_content . ' ';
-            }
-            $text .= "\n" . trim($current_block);
-        } else {
+
+                $body = trim(implode(' ', $block));
+                if ($body === '') {
+                    return;
+                }
+
+                if ($include_speakers && $speaker !== '') {
+                    $paragraphs[] = $speaker . ":\n" . $body;
+                } else {
+                    $paragraphs[] = $body;
+                }
+            };
+
             foreach ($processed_utterances as $p) {
-                $text .= $p['prefix'] . $p['content'] . "\n\n";
+                if ($p['speaker'] !== $current_speaker) {
+                    $append_block($current_speaker, $current_block);
+                    $current_block = [];
+                    $current_speaker = $p['speaker'];
+                }
+
+                $current_block[] = $include_speakers ? $p['line_without_speaker'] : $p['line_with_speaker'];
             }
+
+            $append_block($current_speaker, $current_block);
+
+            $text = implode("\n\n", array_map('trim', $paragraphs));
+        } else {
+            $lines = array_map(function ($p) {
+                return $p['line_with_speaker'];
+            }, $processed_utterances);
+            $text = implode("\n\n", array_map('trim', $lines));
         }
 
         return trim($text);
+    }
+
+    private static function strip_highlight_markup($text) {
+        if (!is_string($text) || $text === '') {
+            return '';
+        }
+
+        $text = preg_replace('/\[\[HIGHLIGHT color="[^\"]+"\]\](.*?)\[\[\/HIGHLIGHT\]\]/s', '$1', $text);
+        $text = preg_replace('/<\/?mark[^>]*>/i', '', $text);
+        $text = wp_strip_all_tags($text, false);
+        return html_entity_decode($text, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+    }
+
+    private static function normalize_export_segment_text($text) {
+        if (!is_string($text)) {
+            return '';
+        }
+
+        $decoded = html_entity_decode($text, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+        $decoded = preg_replace("/\r\n|\r|\n/u", ' ', $decoded);
+        $hasLeadingSpace = preg_match('/^\s/u', $decoded) === 1;
+        $hasTrailingSpace = preg_match('/\s$/u', $decoded) === 1;
+
+        $decoded = trim($decoded);
+        if ($decoded === '') {
+            return ($hasLeadingSpace || $hasTrailingSpace) ? ' ' : '';
+        }
+
+        $decoded = preg_replace('/\s+/u', ' ', $decoded);
+
+        if ($hasLeadingSpace) {
+            $decoded = ' ' . $decoded;
+        }
+
+        if ($hasTrailingSpace) {
+            $decoded .= ' ';
+        }
+
+        return $decoded;
+    }
+
+    private static function build_sentence_chunks($utterance) {
+        $chunks = [];
+        $words = isset($utterance['words']) && is_array($utterance['words']) ? $utterance['words'] : [];
+
+        if (empty($words)) {
+            return $chunks;
+        }
+
+        $buffer = '';
+        $sentence_start = null;
+
+        foreach ($words as $word) {
+            if (!is_array($word) || !isset($word['text'])) {
+                continue;
+            }
+
+            if ($sentence_start === null) {
+                $sentence_start = isset($word['start']) ? $word['start'] : ($utterance['start'] ?? 0);
+            }
+
+            $buffer .= $word['text'] . ' ';
+
+            if (preg_match('/[.?!]$/', trim($word['text']))) {
+                $chunks[] = [
+                    'start' => $sentence_start,
+                    'text' => trim($buffer)
+                ];
+                $buffer = '';
+                $sentence_start = null;
+            }
+        }
+
+        if ($buffer !== '') {
+            $chunks[] = [
+                'start' => $sentence_start ?? ($utterance['start'] ?? 0),
+                'text' => trim($buffer)
+            ];
+        }
+
+        return $chunks;
+    }
+
+    private static function build_export_filename($title, $extension) {
+        return self::sanitize_download_filename($title, $extension);
+    }
+
+    private static function sanitize_download_filename($filename, $extension = '') {
+        $base = is_string($filename) ? $filename : '';
+        $base = wp_strip_all_tags($base);
+        $base = preg_replace('/[\\\\\/:"*?<>|]+/', '', $base);
+        $base = preg_replace('/\s+/u', ' ', trim($base));
+
+        if ($base === '') {
+            $base = 'transcript';
+        }
+
+        $extension = ltrim((string) $extension, '.');
+        if ($extension !== '') {
+            if (!preg_match('/\.' . preg_quote($extension, '/') . '$/u', $base)) {
+                $base .= '.' . $extension;
+            }
+        }
+
+        return $base;
+    }
+
+    private static function build_utterance_segments($utterance, $options, $include_speaker_prefix = true) {
+        $segments = [];
+
+        $include_timestamps = !empty($options['include_timestamps']);
+        $timestamp_mode = $include_timestamps ? ($options['timestamp_mode'] ?? 'utterance') : 'none';
+        $include_speakers = !empty($options['include_speakers']);
+        $include_highlights = !empty($options['include_highlights']);
+        $highlights = $options['highlights'] ?? [];
+
+        if ($include_timestamps && $timestamp_mode === 'utterance' && isset($utterance['start'])) {
+            $segments[] = [
+                'text' => '[' . self::ms_to_time($utterance['start']) . '] ',
+                'color' => null,
+                'bold' => false
+            ];
+        }
+
+        if ($include_speaker_prefix && $include_speakers && !empty($utterance['speaker'])) {
+            $segments[] = [
+                'text' => $utterance['speaker'] . ': ',
+                'color' => null,
+                'bold' => true
+            ];
+        }
+
+        if ($include_timestamps && $timestamp_mode === 'sentence' && !empty($utterance['words'])) {
+            $sentences = self::build_sentence_chunks($utterance);
+            $parts = [];
+            foreach ($sentences as $sentence) {
+                $sentence_text = self::normalize_export_segment_text($sentence['text']);
+                if ($sentence_text === '') {
+                    continue;
+                }
+                $parts[] = '[' . self::ms_to_time($sentence['start']) . '] ' . $sentence_text;
+            }
+
+            if (!empty($parts)) {
+                $segments[] = [
+                    'text' => implode(' ', $parts),
+                    'color' => null,
+                    'bold' => false
+                ];
+                return self::prepare_segments_for_output($segments);
+            }
+        }
+
+        if ($include_highlights) {
+            $raw_segments = (!empty($utterance['words']))
+                ? self::generate_highlighted_segments($utterance, $highlights)
+                : self::parse_highlighted_text($utterance['text']);
+
+            foreach ($raw_segments as $segment) {
+                $normalized = self::normalize_export_segment_text($segment['text']);
+                if ($normalized === '') {
+                    continue;
+                }
+                $color = null;
+                if (!empty($segment['color'])) {
+                    $color = sanitize_hex_color($segment['color']);
+                }
+                $segments[] = [
+                    'text' => $normalized,
+                    'color' => $color ?: null,
+                    'bold' => false
+                ];
+            }
+        } else {
+            $plain_text = self::strip_highlight_markup($utterance['text'] ?? '');
+            $normalized = self::normalize_export_segment_text($plain_text);
+            if ($normalized !== '') {
+                $segments[] = [
+                    'text' => $normalized,
+                    'color' => null,
+                    'bold' => false
+                ];
+            }
+        }
+
+        return self::prepare_segments_for_output($segments);
+    }
+
+    private static function prepare_segments_for_output($segments) {
+        $prepared = [];
+        $previousEndsWithSpace = true;
+
+        foreach ($segments as $segment) {
+            $text = isset($segment['text']) ? $segment['text'] : '';
+            if ($text === '') {
+                continue;
+            }
+
+            $startsWithSpace = preg_match('/^\s/u', $text) === 1;
+            $startsWithPunctuation = preg_match('/^[,.;:?!]/u', $text) === 1;
+
+            if (!$previousEndsWithSpace && !$startsWithSpace && !$startsWithPunctuation) {
+                $text = ' ' . $text;
+            }
+
+            $previousEndsWithSpace = preg_match('/\s$/u', $text) === 1;
+
+            $segment['text'] = $text;
+            $prepared[] = $segment;
+        }
+
+        return $prepared;
+    }
+
+    private static function prepare_export_paragraphs($utterances, $options) {
+        $paragraphs = [];
+        $paragraph_mode = $options['paragraph_mode'] ?? 'utterance';
+        $include_speakers = !empty($options['include_speakers']);
+
+        if ($paragraph_mode === 'continuous') {
+            $combined = [];
+            foreach ($utterances as $utterance) {
+                $segments = self::build_utterance_segments($utterance, $options, true);
+                if (empty($segments)) {
+                    continue;
+                }
+                if (!empty($combined)) {
+                    $combined[] = [
+                        'text' => ' ',
+                        'color' => null,
+                        'bold' => false
+                    ];
+                }
+                $combined = array_merge($combined, $segments);
+            }
+
+            if (!empty($combined)) {
+                $paragraphs[] = ['segments' => self::prepare_segments_for_output($combined)];
+            }
+
+            return $paragraphs;
+        }
+
+        $current_speaker = null;
+
+        foreach ($utterances as $utterance) {
+            $speaker = $utterance['speaker'] ?? '';
+            $include_prefix = !($paragraph_mode === 'speaker' && $include_speakers);
+            $segments = self::build_utterance_segments($utterance, $options, $include_prefix);
+
+            if (empty($segments)) {
+                continue;
+            }
+
+            if ($paragraph_mode === 'speaker') {
+                if ($speaker !== $current_speaker) {
+                    if ($current_speaker !== null) {
+                        $paragraphs[] = ['segments' => []];
+                    }
+
+                    if ($include_speakers && $speaker !== '') {
+                        $paragraphs[] = ['segments' => self::prepare_segments_for_output([
+                            [
+                                'text' => $speaker . ':',
+                                'color' => null,
+                                'bold' => true
+                            ]
+                        ])];
+                    }
+
+                    $current_speaker = $speaker;
+                }
+
+                $paragraphs[] = ['segments' => $segments];
+                continue;
+            }
+
+            $paragraphs[] = ['segments' => $segments];
+        }
+
+        return $paragraphs;
     }
     
     private static function get_highlights_for_export($transcript_id) {
@@ -1614,11 +1942,11 @@ private static function map_hex_to_word_color($hex) {
         return $segments;
     }
     
-    private static function export_as_docx($data, $title, $date, $include_timestamps, $include_speakers, $paragraph_mode, $transcript_id, $include_highlights) {
+    private static function export_as_docx($data, $title, $date, $include_timestamps, $timestamp_mode, $include_speakers, $paragraph_mode, $transcript_id, $include_highlights) {
         if (!class_exists('ZipArchive')) {
-            return self::export_as_rtf($data, $title, $date, $include_timestamps, $include_speakers, $paragraph_mode);
+            return self::export_as_rtf($data, $title, $date, $include_timestamps, $timestamp_mode, $include_speakers, $paragraph_mode);
         }
-        
+
         $highlights = ($include_highlights && $transcript_id) ? self::get_highlights_for_export($transcript_id) : [];
 
         $upload_dir = wp_upload_dir();
@@ -1644,65 +1972,76 @@ private static function map_hex_to_word_color($hex) {
         $docContent .= '<w:p><w:pPr><w:pStyle w:val="Title"/></w:pPr><w:r><w:t>' . htmlspecialchars($title, ENT_XML1, 'UTF-8') . '</w:t></w:r></w:p>';
         $docContent .= '<w:p><w:r><w:t>' . htmlspecialchars($date, ENT_XML1, 'UTF-8') . '</w:t></w:r></w:p>';
 
-       $utterances = isset($data['utterances']) ? $data['utterances'] : [];
-    // in transcribe-ai.php, inside the export_as_docx function
-// REPLACE the entire "foreach ($utterances as $utterance)" loop with this:
+        $utterances = isset($data['utterances']) ? $data['utterances'] : [];
+        $options = [
+            'include_timestamps' => $include_timestamps,
+            'timestamp_mode' => $timestamp_mode,
+            'include_speakers' => $include_speakers,
+            'paragraph_mode' => $paragraph_mode,
+            'include_highlights' => $include_highlights,
+            'highlights' => $highlights
+        ];
 
-        foreach ($utterances as $utterance) {
+        $paragraphs = self::prepare_export_paragraphs($utterances, $options);
+
+        foreach ($paragraphs as $paragraph) {
+            if (empty($paragraph['segments'])) {
+                $docContent .= '<w:p/>';
+                continue;
+            }
+
             $docContent .= '<w:p>';
-            if ($include_timestamps) {
-                $docContent .= '<w:r><w:t xml:space="preserve">[' . self::ms_to_time($utterance['start']) . '] </w:t></w:r>';
-            }
-            if ($include_speakers && isset($utterance['speaker'])) {
-                $docContent .= '<w:r><w:rPr><w:b/></w:rPr><w:t xml:space="preserve">' . htmlspecialchars($utterance['speaker'], ENT_XML1, 'UTF-8') . ': </w:t></w:r>';
-            }
-
-            // +++ START OF THE FIX +++
-            if ($include_highlights) {
-                // If highlights are ON, get segments for both original and edited text
-                $segments = isset($utterance['words']) && !empty($utterance['words'])
-                    ? self::generate_highlighted_segments($utterance, $highlights)
-                    : self::parse_highlighted_text($utterance['text']);
-                
-                foreach ($segments as $segment) {
-                    $docContent .= '<w:r>';
-                    if ($segment['color']) {
-                        $mapped_color = self::map_hex_to_word_color($segment['color']);
-                        $docContent .= '<w:rPr><w:highlight w:val="' . esc_attr($mapped_color) . '"/></w:rPr>';
-                    }
-                    $docContent .= '<w:t xml:space="preserve"> ' . htmlspecialchars($segment['text'], ENT_XML1, 'UTF-8') . '</w:t></w:r>';
+            foreach ($paragraph['segments'] as $segment) {
+                $text = isset($segment['text']) ? $segment['text'] : '';
+                if ($text === '') {
+                    continue;
                 }
-            } else {
-                // If highlights are OFF, strip the markers before outputting the text
-                $clean_text = preg_replace('/\[\[HIGHLIGHT color="[^"]+"\]\](.*?)\[\[\/HIGHLIGHT\]\]/', '$1', $utterance['text']);
-                $docContent .= '<w:r><w:t xml:space="preserve"> ' . htmlspecialchars($clean_text, ENT_XML1, 'UTF-8') . '</w:t></w:r>';
-            }
-            // +++ END OF THE FIX +++
 
+                $docContent .= '<w:r>';
+                $runProps = '';
+                if (!empty($segment['bold']) || !empty($segment['color'])) {
+                    $runProps .= '<w:rPr>';
+                    if (!empty($segment['bold'])) {
+                        $runProps .= '<w:b/>';
+                    }
+                    if (!empty($segment['color'])) {
+                        $mapped_color = self::map_hex_to_word_color($segment['color']);
+                        $runProps .= '<w:highlight w:val="' . htmlspecialchars($mapped_color, ENT_XML1, 'UTF-8') . '"/>';
+                    }
+                    $runProps .= '</w:rPr>';
+                }
+
+                if ($runProps !== '') {
+                    $docContent .= $runProps;
+                }
+
+                $docContent .= '<w:t xml:space="preserve">' . htmlspecialchars($text, ENT_XML1, 'UTF-8') . '</w:t>';
+                $docContent .= '</w:r>';
+            }
             $docContent .= '</w:p>';
         }
-        
-        
+
         $docContent .= '</w:body></w:document>';
         $zip->addFromString('word/document.xml', $docContent);
         $zip->close();
-        
+
         $download_url = add_query_arg([
             'transcribe_download' => 1,
             'file' => basename($filepath),
-            'nonce' => wp_create_nonce('download_' . basename($filepath))
+            'nonce' => wp_create_nonce('download_' . basename($filepath)),
+            'display' => rawurlencode(base64_encode(self::build_export_filename($title, 'docx')))
         ], home_url('/'));
-        
+
         wp_schedule_single_event(time() + 3600, 'transcribe_ai_cleanup_temp_file', [$filepath]);
-        
+
         return [
             'download_url' => $download_url,
-            'filename' => sanitize_file_name($title) . '.docx',
+            'filename' => self::build_export_filename($title, 'docx'),
             'is_download_url' => true
         ];
     }
-    
-    private static function export_as_rtf($data, $title, $date, $include_timestamps, $include_speakers, $paragraph_mode) {
+
+    private static function export_as_rtf($data, $title, $date, $include_timestamps, $timestamp_mode, $include_speakers, $paragraph_mode) {
         $upload_dir = wp_upload_dir();
         $temp_dir = $upload_dir['basedir'] . '/transcribe-ai-temp/';
         if (!file_exists($temp_dir)) {
@@ -1719,31 +2058,44 @@ private static function map_hex_to_word_color($hex) {
         $rtf .= self::rtf_encode($date) . '\par\par ';
         
         $utterances = isset($data['utterances']) ? $data['utterances'] : [];
+        $effective_timestamp_mode = $include_timestamps ? $timestamp_mode : 'none';
         foreach ($utterances as $utterance) {
-            if ($include_timestamps) {
+            if ($effective_timestamp_mode === 'utterance' && isset($utterance['start'])) {
                 $rtf .= '[' . self::ms_to_time($utterance['start']) . '] ';
             }
             if ($include_speakers && isset($utterance['speaker'])) {
-                $rtf .= '\b Speaker ' . self::rtf_encode($utterance['speaker']) . ':\b0 ';
+                $rtf .= '\b ' . self::rtf_encode($utterance['speaker']) . ':\b0 ';
             }
-            $rtf .= self::rtf_encode($utterance['text']) . '\par\par ';
+
+            if ($effective_timestamp_mode === 'sentence' && !empty($utterance['words'])) {
+                $sentences = self::build_sentence_chunks($utterance);
+                $parts = [];
+                foreach ($sentences as $sentence) {
+                    $parts[] = '[' . self::ms_to_time($sentence['start']) . '] ' . self::rtf_encode($sentence['text']);
+                }
+                $rtf .= implode(' ', $parts) . '\par\par ';
+            } else {
+                $plain = self::strip_highlight_markup($utterance['text'] ?? '');
+                $rtf .= self::rtf_encode($plain) . '\par\par ';
+            }
         }
-        
+
         $rtf .= '}';
-        
+
         file_put_contents($filepath, $rtf);
-        
+
         $download_url = add_query_arg([
             'transcribe_download' => 1,
             'file' => basename($filepath),
-            'nonce' => wp_create_nonce('download_' . basename($filepath))
+            'nonce' => wp_create_nonce('download_' . basename($filepath)),
+            'display' => rawurlencode(base64_encode(self::build_export_filename($title, 'rtf')))
         ], home_url('/'));
-        
+
         wp_schedule_single_event(time() + 3600, 'transcribe_ai_cleanup_temp_file', [$filepath]);
-        
+
         return [
             'download_url' => $download_url,
-            'filename' => sanitize_file_name($title) . '.rtf',
+            'filename' => self::build_export_filename($title, 'rtf'),
             'is_download_url' => true
         ];
     }
@@ -1756,148 +2108,243 @@ private static function map_hex_to_word_color($hex) {
         return mb_convert_encoding($text, 'HTML-ENTITIES', 'UTF-8');
     }
 
-   private static function export_as_pdf($data, $title, $date, $include_timestamps, $include_speakers, $paragraph_mode, $transcript_id, $include_highlights) {
-    // Check if TCPDF is available
-    $tcpdf_path = TRANSCRIBE_AI_PLUGIN_DIR . 'vendor/autoload.php';
-    if (!file_exists($tcpdf_path)) {
-        // Fallback to HTML if TCPDF not installed
-        return self::export_as_html_fallback($data, $title, $date, $include_timestamps, $include_speakers, $paragraph_mode, $transcript_id, $include_highlights);
-    }
-    
-    require_once($tcpdf_path);
-    
-    // Create new PDF document
-    $pdf = new TCPDF(PDF_PAGE_ORIENTATION, PDF_UNIT, PDF_PAGE_FORMAT, true, 'UTF-8', false);
-    
-    // Set document information
-    $pdf->SetCreator('Transcribe AI');
-    $pdf->SetAuthor('Transcribe AI');
-    $pdf->SetTitle($title);
-    $pdf->SetSubject('Transcript');
-    
-    // Remove default header/footer
-    $pdf->setPrintHeader(false);
-    $pdf->setPrintFooter(false);
-    
-    // Set margins
-    $pdf->SetMargins(15, 15, 15);
-    $pdf->SetAutoPageBreak(TRUE, 15);
-    
-    // Set font
-    $pdf->SetFont('dejavusans', '', 10);
-    
-    // Add a page
-    $pdf->AddPage();
-    
-    // Title
-    $pdf->SetFont('dejavusans', 'B', 16);
-    $pdf->Cell(0, 10, $title, 0, 1);
-    
-    // Date
-    $pdf->SetFont('dejavusans', '', 10);
-    $pdf->SetTextColor(128, 128, 128);
-    $pdf->Cell(0, 5, $date, 0, 1);
-    $pdf->Ln(5);
-    
-    // Reset text color
-    $pdf->SetTextColor(0, 0, 0);
-    
-    // Get highlights if needed
-    $highlights = ($include_highlights && $transcript_id) ? self::get_highlights_for_export($transcript_id) : [];
-    
-    // Process utterances
-    $utterances = isset($data['utterances']) ? $data['utterances'] : [];
-    
-   // in transcribe-ai.php, inside the export_as_pdf function
-// REPLACE the entire "foreach ($utterances as $utterance)" loop with this:
+   private static function export_as_pdf($data, $title, $date, $include_timestamps, $timestamp_mode, $include_speakers, $paragraph_mode, $transcript_id, $include_highlights) {
+        // Check if TCPDF is available
+        $tcpdf_path = TRANSCRIBE_AI_PLUGIN_DIR . 'vendor/autoload.php';
+        if (!file_exists($tcpdf_path)) {
+            // Graceful fallback if the PDF library is not bundled
+            return self::export_as_html_fallback(
+                $data,
+                $title,
+                $date,
+                $include_timestamps,
+                $timestamp_mode,
+                $include_speakers,
+                $paragraph_mode,
+                $transcript_id,
+                $include_highlights
+            );
+        }
 
-    foreach ($utterances as $utterance) {
+        require_once($tcpdf_path);
+
+        // Create new PDF document
+        $pdf = new TCPDF(PDF_PAGE_ORIENTATION, PDF_UNIT, PDF_PAGE_FORMAT, true, 'UTF-8', false);
+
+        // Set document information
+        $pdf->SetCreator('Transcribe AI');
+        $pdf->SetAuthor('Transcribe AI');
+        $pdf->SetTitle($title);
+        $pdf->SetSubject('Transcript');
+
+        // Remove default header/footer
+        $pdf->setPrintHeader(false);
+        $pdf->setPrintFooter(false);
+
+        // Set margins
+        $pdf->SetMargins(15, 15, 15);
+        $pdf->SetAutoPageBreak(true, 15);
+
+        // Set font
         $pdf->SetFont('dejavusans', '', 10);
-        $pdf->SetFillColor(255, 255, 255); // Reset fill color
 
-        $line_prefix = '';
-        if ($include_timestamps) {
-            $line_prefix .= '[' . self::ms_to_time($utterance['start']) . '] ';
-        }
-        if ($include_speakers && isset($utterance['speaker'])) {
-            $line_prefix .= $utterance['speaker'] . ': ';
-        }
-        
-        // Write the speaker/timestamp prefix first
-        if ($line_prefix) {
-            $pdf->SetFont('dejavusans', 'B', 10);
-            $pdf->Write(0, $line_prefix, '', false);
-            $pdf->SetFont('dejavusans', '', 10);
-        }
+        // Add a page
+        $pdf->AddPage();
 
-        // +++ START OF THE FIX +++
-        if ($include_highlights) {
-            // If highlights are ON, process segments
-            $segments = isset($utterance['words']) && !empty($utterance['words'])
-                ? self::generate_highlighted_segments($utterance, $highlights)
-                : self::parse_highlighted_text($utterance['text']);
+        // Title
+        $pdf->SetFont('dejavusans', 'B', 16);
+        $pdf->Cell(0, 10, $title, 0, 1);
 
-            foreach ($segments as $segment) {
-                if ($segment['color']) {
-                    $rgb = self::hex_to_rgb($segment['color']);
-                    $pdf->SetFillColor($rgb[0], $rgb[1], $rgb[2]);
-                    $pdf->Write(0, $segment['text'], '', true); // Final argument 'true' enables the fill
-                } else {
-                    $pdf->SetFillColor(255, 255, 255); // No fill
-                    $pdf->Write(0, $segment['text'], '', false);
-                }
+        // Date
+        $pdf->SetFont('dejavusans', '', 10);
+        $pdf->SetTextColor(128, 128, 128);
+        $pdf->Cell(0, 5, $date, 0, 1);
+        $pdf->Ln(5);
+
+        // Reset text color
+        $pdf->SetTextColor(0, 0, 0);
+
+        // Get highlights if needed
+        $highlights = ($include_highlights && $transcript_id) ? self::get_highlights_for_export($transcript_id) : [];
+
+        // Process utterances
+        $utterances = isset($data['utterances']) ? $data['utterances'] : [];
+
+        $options = [
+            'include_timestamps' => $include_timestamps,
+            'timestamp_mode' => $timestamp_mode,
+            'include_speakers' => $include_speakers,
+            'paragraph_mode' => $paragraph_mode,
+            'include_highlights' => $include_highlights,
+            'highlights' => $highlights,
+        ];
+
+        $paragraphs = self::prepare_export_paragraphs($utterances, $options);
+
+        foreach ($paragraphs as $paragraph) {
+            if (empty($paragraph['segments'])) {
+                $pdf->Ln(6);
+                continue;
             }
-        } else {
-            // If highlights are OFF, strip the markers before writing
-            $clean_text = preg_replace('/\[\[HIGHLIGHT color="[^"]+"\]\](.*?)\[\[\/HIGHLIGHT\]\]/', '$1', $utterance['text']);
-            $pdf->SetFillColor(255, 255, 255);
-            $pdf->Write(0, $clean_text, '', false);
+
+            $html = '<span style="font-size:10pt; font-family:dejavusans; white-space: pre-wrap;">';
+            foreach ($paragraph['segments'] as $segment) {
+                $text = isset($segment['text']) ? $segment['text'] : '';
+                if ($text === '') {
+                    continue;
+                }
+
+                $encoded = htmlspecialchars($text, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+                $open = '';
+                $close = '';
+
+                if (!empty($segment['bold'])) {
+                    $open .= '<strong>';
+                    $close = '</strong>' . $close;
+                }
+
+                if (!empty($segment['color'])) {
+                    $color = sanitize_hex_color($segment['color']);
+                    if (!$color) {
+                        $color = '#ffff00';
+                    }
+                    $open .= '<span style="background-color:' . $color . ';">';
+                    $close = '</span>' . $close;
+                }
+
+                $html .= $open . $encoded . $close;
+            }
+            $html .= '</span>';
+
+            $pdf->writeHTML($html, true, false, true, false, '');
+
+            if ($paragraph_mode !== 'continuous') {
+                $pdf->Ln(2);
+            }
         }
-        // +++ END OF THE FIX +++
 
-        $pdf->Ln(8); // Add space after each utterance
-    }    
-    // Save PDF to temp file
-    $upload_dir = wp_upload_dir();
-    $temp_dir = $upload_dir['basedir'] . '/transcribe-ai-temp/';
-    if (!file_exists($temp_dir)) {
-        wp_mkdir_p($temp_dir);
+        // Save PDF to temp file
+        $upload_dir = wp_upload_dir();
+        $temp_dir = $upload_dir['basedir'] . '/transcribe-ai-temp/';
+        if (!file_exists($temp_dir)) {
+            wp_mkdir_p($temp_dir);
+        }
+
+        $safe_title = sanitize_file_name($title);
+        $filename = $safe_title . '_' . uniqid() . '.pdf';
+        $filepath = $temp_dir . $filename;
+
+        $pdf->Output($filepath, 'F');
+
+        $download_url = add_query_arg([
+            'transcribe_download' => 1,
+            'file' => basename($filepath),
+            'nonce' => wp_create_nonce('download_' . basename($filepath)),
+            'display' => rawurlencode(base64_encode(self::build_export_filename($title, 'pdf')))
+        ], home_url('/'));
+
+        wp_schedule_single_event(time() + 3600, 'transcribe_ai_cleanup_temp_file', [$filepath]);
+
+        return [
+            'download_url' => $download_url,
+            'filename' => self::build_export_filename($title, 'pdf'),
+            'is_download_url' => true,
+            'message' => __('PDF generated successfully!', 'transcribe-ai')
+        ];
     }
-    
-    $safe_title = sanitize_file_name($title);
-    $filename = $safe_title . '_' . uniqid() . '.pdf';
-    $filepath = $temp_dir . $filename;
-    
-    $pdf->Output($filepath, 'F');
-    
-    // Create download URL
-    $download_url = add_query_arg([
-        'transcribe_download' => 1,
-        'file' => basename($filepath),
-        'nonce' => wp_create_nonce('download_' . basename($filepath))
-    ], home_url('/'));
-    
-    // Schedule cleanup
-    wp_schedule_single_event(time() + 3600, 'transcribe_ai_cleanup_temp_file', [$filepath]);
-    
-    return [
-        'download_url' => $download_url,
-        'filename' => $safe_title . '.pdf',
-        'is_download_url' => true,
-        'message' => 'PDF generated successfully!'
-    ];
-}
 
-// Helper function to convert hex to RGB
-private static function hex_to_rgb($hex) {
-    $hex = ltrim($hex, '#');
-    return [
-        hexdec(substr($hex, 0, 2)),
-        hexdec(substr($hex, 2, 2)),
-        hexdec(substr($hex, 4, 2))
-    ];
-}
-    
+    private static function export_as_html_fallback($data, $title, $date, $include_timestamps, $timestamp_mode, $include_speakers, $paragraph_mode, $transcript_id, $include_highlights) {
+        $highlights = ($include_highlights && $transcript_id) ? self::get_highlights_for_export($transcript_id) : [];
+        $utterances = isset($data['utterances']) ? $data['utterances'] : [];
+
+        $options = [
+            'include_timestamps' => $include_timestamps,
+            'timestamp_mode' => $timestamp_mode,
+            'include_speakers' => $include_speakers,
+            'paragraph_mode' => $paragraph_mode,
+            'include_highlights' => $include_highlights,
+            'highlights' => $highlights,
+        ];
+
+        $paragraphs = self::prepare_export_paragraphs($utterances, $options);
+
+        $html = '<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">';
+        $html .= '<title>' . esc_html($title) . '</title>';
+        $html .= '<style>body{font-family:Arial,Helvetica,sans-serif;margin:24px;color:#111;line-height:1.6;}';
+        $html .= 'h1{font-size:24px;margin:0 0 8px;}';
+        $html .= '.transcript-date{color:#555;margin:0 0 24px;}';
+        $html .= '.transcript-paragraph{white-space:pre-wrap;margin:0 0 16px;font-size:14px;}';
+        $html .= '.transcript-gap{height:12px;}';
+        $html .= '.transcript-highlight{padding:0 2px;border-radius:2px;}';
+        $html .= '</style></head><body>';
+        $html .= '<h1>' . esc_html($title) . '</h1>';
+        $html .= '<p class="transcript-date">' . esc_html($date) . '</p>';
+
+        foreach ($paragraphs as $paragraph) {
+            if (empty($paragraph['segments'])) {
+                $html .= '<div class="transcript-gap"></div>';
+                continue;
+            }
+
+            $html .= '<p class="transcript-paragraph">';
+            foreach ($paragraph['segments'] as $segment) {
+                $text = isset($segment['text']) ? $segment['text'] : '';
+                if ($text === '') {
+                    continue;
+                }
+
+                $encoded = esc_html($text);
+                $open = '';
+                $close = '';
+
+                if (!empty($segment['bold'])) {
+                    $open .= '<strong>';
+                    $close = '</strong>' . $close;
+                }
+
+                if (!empty($segment['color'])) {
+                    $color = sanitize_hex_color($segment['color']);
+                    if (!$color) {
+                        $color = '#ffff00';
+                    }
+                    $open .= '<span class="transcript-highlight" style="background-color:' . esc_attr($color) . ';">';
+                    $close = '</span>' . $close;
+                }
+
+                $html .= $open . $encoded . $close;
+            }
+            $html .= '</p>';
+        }
+
+        $html .= '</body></html>';
+
+        $upload_dir = wp_upload_dir();
+        $temp_dir = $upload_dir['basedir'] . '/transcribe-ai-temp/';
+        if (!file_exists($temp_dir)) {
+            wp_mkdir_p($temp_dir);
+        }
+
+        $filename = 'transcript_' . uniqid() . '.html';
+        $filepath = trailingslashit($temp_dir) . $filename;
+        file_put_contents($filepath, $html);
+
+        $download_url = add_query_arg([
+            'transcribe_download' => 1,
+            'file' => basename($filepath),
+            'nonce' => wp_create_nonce('download_' . basename($filepath)),
+            'display' => rawurlencode(base64_encode(self::build_export_filename($title, 'html')))
+        ], home_url('/'));
+
+        wp_schedule_single_event(time() + 3600, 'transcribe_ai_cleanup_temp_file', [$filepath]);
+
+        return [
+            'download_url' => $download_url,
+            'filename' => self::build_export_filename($title, 'html'),
+            'is_download_url' => true,
+            'message' => __('PDF export unavailable - provided HTML instead.', 'transcribe-ai')
+        ];
+    }
+
     private static function generate_html_for_export($data, $title, $date, $include_timestamps, $include_speakers, $paragraph_mode, $transcript_id, $include_highlights) {
         $html = '<h1>' . esc_html($title) . '</h1>';
         $html .= '<p class="meta">' . esc_html($date) . '</p>';

@@ -142,6 +142,24 @@
                             <div class="timestamps-option" data-mode="none"><?php _e('Hide All', 'transcribe-ai'); ?></div>
                         </div>
                     </div>
+
+                    <div id="copyDropdown" class="control-dropdown-container copy-dropdown-container">
+                        <button id="copyTranscriptBtn" type="button" class="control-btn" aria-label="<?php esc_attr_e('Copy transcript to clipboard', 'transcribe-ai'); ?>">
+                            <span class="material-symbols-outlined">save</span>
+                            <span><?php _e('Copy', 'transcribe-ai'); ?></span>
+                            <span class="material-symbols-outlined dropdown-arrow" aria-hidden="true">arrow_drop_down</span>
+                        </button>
+                        <div id="copyMenu" class="control-dropdown-menu" role="menu" aria-label="<?php esc_attr_e('Copy options', 'transcribe-ai'); ?>">
+                            <div class="copy-option" data-target="original" role="menuitem">
+                                <span class="material-symbols-outlined">content_copy</span>
+                                <span><?php _e('Copy Original', 'transcribe-ai'); ?></span>
+                            </div>
+                            <div class="copy-option translation-option" data-target="translation" role="menuitem">
+                                <span class="material-symbols-outlined">translate</span>
+                                <span><?php _e('Copy Translation', 'transcribe-ai'); ?></span>
+                            </div>
+                        </div>
+                    </div>
                 </div>
                 <div class="control-group">
                     <button id="deleteBtn" class="control-btn control-btn-danger" aria-label="<?php esc_attr_e('Delete transcript', 'transcribe-ai'); ?>">
