@@ -1699,35 +1699,52 @@ updateHighlightsForEditedText() {
             this.jumpToSearchResult(this.currentSearchIndex);
         }
 
-   jumpToSearchResult(index) {
+        jumpToSearchResult(index) {
             if (!this.searchResults || this.searchResults.length === 0) return;
 
             // Remove .current class from *all* search highlights
             this.$transcriptContent.find('mark.search-highlight').removeClass('current');
-            
+
             // Add .current class to the new target <mark>
             const $currentMark = $(this.searchResults[index]);
             $currentMark.addClass('current');
-            
+
             // Scroll to the parent utterance row
             const $utterance = $currentMark.closest('.utterance-row');
             if ($utterance.length) {
-                let stickyOffset = 0;
-                const $sticky = $('.sticky-container');
-                if ($sticky.hasClass('is-sticky')) {
-                    stickyOffset = $sticky.outerHeight();
-                }
-                
-                // Calculate scroll position relative to the viewport
-                const elementTop = $utterance.offset().top;
-                const viewportTop = $(window).scrollTop();
-                const viewportHeight = $(window).height();
+                const $scrollContainer = $currentMark.closest('.transcript-content');
 
-                // Only scroll if the element is not already in view
-                if (elementTop < viewportTop + stickyOffset || elementTop > viewportTop + viewportHeight - 100) {
-                     $('html, body').animate({ 
-                         scrollTop: elementTop - stickyOffset - 100 
-                     }, 300);
+                if ($scrollContainer.length) {
+                    const container = $scrollContainer.get(0);
+                    const containerRect = container.getBoundingClientRect();
+                    const targetRect = $utterance.get(0).getBoundingClientRect();
+                    const isAbove = targetRect.top < containerRect.top;
+                    const isBelow = targetRect.bottom > containerRect.bottom;
+
+                    if (isAbove || isBelow) {
+                        const padding = 60;
+                        const offsetWithinContainer = targetRect.top - containerRect.top;
+                        const targetScrollTop = container.scrollTop + offsetWithinContainer - padding;
+                        $scrollContainer.stop(true).animate({
+                            scrollTop: Math.max(targetScrollTop, 0)
+                        }, 300);
+                    }
+                } else {
+                    let stickyOffset = 0;
+                    const $sticky = $('.sticky-container');
+                    if ($sticky.hasClass('is-sticky')) {
+                        stickyOffset = $sticky.outerHeight();
+                    }
+
+                    const elementTop = $utterance.offset().top;
+                    const viewportTop = $(window).scrollTop();
+                    const viewportHeight = $(window).height();
+
+                    if (elementTop < viewportTop + stickyOffset || elementTop > viewportTop + viewportHeight - 100) {
+                        $('html, body').animate({
+                            scrollTop: elementTop - stickyOffset - 100
+                        }, 300);
+                    }
                 }
             }
 
@@ -2613,6 +2630,17 @@ handleTextSelection(e) {
                                         <input type="checkbox" id="includeHighlights" value="true" checked>
                                         <span>Include highlights (DOCX/PDF only)</span>
                                     </label>
+                                    <div class="export-radio-group timestamp-mode-group" style="display: none;">
+                                        <label>Timestamp Detail:</label>
+                                        <label class="export-radio">
+                                            <input type="radio" name="exportTimestampMode" value="utterance" checked>
+                                            <span>Per Utterance</span>
+                                        </label>
+                                        <label class="export-radio">
+                                            <input type="radio" name="exportTimestampMode" value="sentence">
+                                            <span>Per Sentence</span>
+                                        </label>
+                                    </div>
                                     <div class="export-radio-group">
                                         <label>Paragraph Formatting:</label>
                                         <label class="export-radio">
@@ -2646,15 +2674,31 @@ handleTextSelection(e) {
             const $modal = $('#exportModal');
             $modal.fadeIn(200);
 
+            const preferredTimestampMode = (this.currentTimestampMode === 'sentence') ? 'sentence' : 'utterance';
+            $modal.find(`input[name="exportTimestampMode"][value="${preferredTimestampMode}"]`).prop('checked', true);
+
+            const updateTimestampModeVisibility = () => {
+                const format = $modal.data('selectedFormat');
+                const includeTimestamps = $modal.find('#includeTimestamps').is(':checked');
+                const $timestampGroup = $modal.find('.timestamp-mode-group');
+
+                if (['docx', 'pdf'].includes(format) && includeTimestamps) {
+                    $timestampGroup.stop(true).slideDown(100);
+                } else {
+                    $timestampGroup.stop(true).slideUp(100);
+                }
+            };
+
             $modal.on('click', '.export-option', function() {
                 const $this = $(this);
                 $modal.find('.export-option').removeClass('selected');
                 $this.addClass('selected');
-                
+
                 const format = $this.data('export-format');
                 const $optionsSection = $modal.find('.export-options-section');
                 const $highlightsOption = $modal.find('#includeHighlightsLabel');
-                
+                $modal.data('selectedFormat', format);
+
                 if (['txt', 'docx', 'pdf'].includes(format)) {
                     $optionsSection.slideDown(200);
                     if (['docx', 'pdf'].includes(format)) {
@@ -2666,9 +2710,14 @@ handleTextSelection(e) {
                     $optionsSection.slideUp(200);
                     $highlightsOption.slideUp(100);
                 }
+                updateTimestampModeVisibility();
                 $modal.find('.export-actions').slideDown(200);
             });
-            
+
+            $modal.on('change', '#includeTimestamps', () => {
+                updateTimestampModeVisibility();
+            });
+
             $modal.on('click', '#confirmExportBtn', () => {
                 const format = $modal.find('.export-option.selected').data('export-format');
                 if (format) {
@@ -2691,9 +2740,16 @@ handleTextSelection(e) {
             const includeSpeakers = $modal.find('#includeSpeakers').is(':checked');
             const includeHighlights = $modal.find('#includeHighlights').is(':checked');
             const paragraphMode = $modal.find('input[name="paragraphMode"]:checked').val() || 'utterance';
-            const timestampMode = includeTimestamps
-                ? (this.currentTimestampMode || 'utterance')
-                : 'none';
+            let timestampMode = 'none';
+
+            if (includeTimestamps) {
+                if (['docx', 'pdf'].includes(format)) {
+                    const selectedMode = $modal.find('input[name="exportTimestampMode"]:checked').val();
+                    timestampMode = selectedMode === 'sentence' ? 'sentence' : 'utterance';
+                } else {
+                    timestampMode = this.currentTimestampMode || 'utterance';
+                }
+            }
             
             // Apply speaker map to export data
             const exportData = JSON.parse(JSON.stringify(this.transcriptData.data));
