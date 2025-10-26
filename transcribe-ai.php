@@ -1467,6 +1467,18 @@ public static function save_transcript() {
                 $line_with_speaker = $speaker . ': ' . $line_without_speaker;
             }
 
+            $line_without_speaker = $line_body;
+            if ($effective_timestamp_mode === 'utterance' && isset($utterance['start'])) {
+                $line_without_speaker = '[' . self::ms_to_time($utterance['start']) . '] ' . $line_without_speaker;
+            }
+
+            $line_without_speaker = trim(preg_replace('/\s+/u', ' ', $line_without_speaker));
+
+            $line_with_speaker = $line_without_speaker;
+            if ($include_speakers && $speaker !== '') {
+                $line_with_speaker = $speaker . ': ' . $line_without_speaker;
+            }
+
             $processed_utterances[] = [
                 'line_with_speaker' => $line_with_speaker,
                 'line_without_speaker' => $line_without_speaker,
