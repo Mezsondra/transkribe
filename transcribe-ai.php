@@ -380,15 +380,15 @@ class Transcribe_AI {
         if (isset($_GET['display'])) {
             $encoded = sanitize_text_field(wp_unslash($_GET['display']));
             $decoded = base64_decode(rawurldecode($encoded));
-            if (is_string($decoded) && $decoded !== '') {
-                $display_name = self::sanitize_download_filename($decoded, $extension);
+           if (is_string($decoded) && $decoded !== '') {
+                $display_name = Transcribe_AI_Helpers::sanitize_download_filename($decoded, $extension);
             }
         }
 
         if ($display_name === '') {
-            $display_name = self::sanitize_download_filename($file, $extension);
+            $display_name = Transcribe_AI_Helpers::sanitize_download_filename($file, $extension);
         }
-
+        
         header('Content-Type: ' . $content_type);
         header('Content-Disposition: attachment; filename="' . $display_name . '"; filename*=UTF-8\'\'' . rawurlencode($display_name));
         header('Content-Length: ' . filesize($filepath));
@@ -642,6 +642,27 @@ class Transcribe_AI_Helpers {
             'TR' => 'Turkish', 'UK' => 'Ukrainian'
         ];
     }
+    
+        public static function sanitize_download_filename($filename, $extension = '') {
+        $base = is_string($filename) ? $filename : '';
+        $base = wp_strip_all_tags($base);
+        $base = preg_replace('/[\\\\\/:"*?<>|]+/', '', $base);
+        $base = preg_replace('/\s+/u', ' ', trim($base));
+
+        if ($base === '') {
+            $base = 'transcript';
+        }
+
+        $extension = ltrim((string) $extension, '.');
+        if ($extension !== '') {
+            if (!preg_match('/\.' . preg_quote($extension, '/') . '$/u', $base)) {
+                $base .= '.' . $extension;
+            }
+        }
+
+        return $base;
+    }
+    
 }
 
 
@@ -1467,18 +1488,6 @@ public static function save_transcript() {
                 $line_with_speaker = $speaker . ': ' . $line_without_speaker;
             }
 
-            $line_without_speaker = $line_body;
-            if ($effective_timestamp_mode === 'utterance' && isset($utterance['start'])) {
-                $line_without_speaker = '[' . self::ms_to_time($utterance['start']) . '] ' . $line_without_speaker;
-            }
-
-            $line_without_speaker = trim(preg_replace('/\s+/u', ' ', $line_without_speaker));
-
-            $line_with_speaker = $line_without_speaker;
-            if ($include_speakers && $speaker !== '') {
-                $line_with_speaker = $speaker . ': ' . $line_without_speaker;
-            }
-
             $processed_utterances[] = [
                 'line_with_speaker' => $line_with_speaker,
                 'line_without_speaker' => $line_without_speaker,
@@ -1618,28 +1627,9 @@ public static function save_transcript() {
     }
 
     private static function build_export_filename($title, $extension) {
-        return self::sanitize_download_filename($title, $extension);
+        return Transcribe_AI_Helpers::sanitize_download_filename($title, $extension);
     }
 
-    private static function sanitize_download_filename($filename, $extension = '') {
-        $base = is_string($filename) ? $filename : '';
-        $base = wp_strip_all_tags($base);
-        $base = preg_replace('/[\\\\\/:"*?<>|]+/', '', $base);
-        $base = preg_replace('/\s+/u', ' ', trim($base));
-
-        if ($base === '') {
-            $base = 'transcript';
-        }
-
-        $extension = ltrim((string) $extension, '.');
-        if ($extension !== '') {
-            if (!preg_match('/\.' . preg_quote($extension, '/') . '$/u', $base)) {
-                $base .= '.' . $extension;
-            }
-        }
-
-        return $base;
-    }
 
     private static function build_utterance_segments($utterance, $options, $include_speaker_prefix = true) {
         $segments = [];
@@ -1981,8 +1971,8 @@ private static function map_hex_to_word_color($hex) {
         $zip->addFromString('word/_rels/document.xml.rels', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>');
 
         $docContent = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>';
-        $docContent .= '<w:p><w:pPr><w:pStyle w:val="Title"/></w:pPr><w:r><w:t>' . htmlspecialchars($title, ENT_XML1, 'UTF-8') . '</w:t></w:r></w:p>';
-        $docContent .= '<w:p><w:r><w:t>' . htmlspecialchars($date, ENT_XML1, 'UTF-8') . '</w:t></w:r></w:p>';
+		$clean_title = self::strip_invalid_xml_chars($title);
+        $docContent .= '<w:p><w:pPr><w:pStyle w:val="Title"/></w:pPr><w:r><w:t>' . htmlspecialchars($clean_title, ENT_XML1, 'UTF-8') . '</w:t></w:r></w:p>';        $docContent .= '<w:p><w:r><w:t>' . htmlspecialchars($date, ENT_XML1, 'UTF-8') . '</w:t></w:r></w:p>';
 
         $utterances = isset($data['utterances']) ? $data['utterances'] : [];
         $options = [
@@ -2005,6 +1995,7 @@ private static function map_hex_to_word_color($hex) {
             $docContent .= '<w:p>';
             foreach ($paragraph['segments'] as $segment) {
                 $text = isset($segment['text']) ? $segment['text'] : '';
+                $text = self::strip_invalid_xml_chars($text);
                 if ($text === '') {
                     continue;
                 }
@@ -2111,20 +2102,42 @@ private static function map_hex_to_word_color($hex) {
             'is_download_url' => true
         ];
     }
-    
-    private static function rtf_encode($text) {
+    private static function strip_invalid_xml_chars($text) {
+        if (!is_string($text) || empty($text)) {
+            return $text;
+        }
+        // Removes most C0 controls (keeps tab, newline, carriage return) and C1 controls
+        return preg_replace('/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x84\x86-\x9F]/u', '', $text);
+    }
+private static function rtf_encode($text) {
         $text = str_replace('\\', '\\\\', $text);
         $text = str_replace('{', '\{', $text);
         $text = str_replace('}', '\}', $text);
         $text = str_replace("\n", '\par ', $text);
-        return mb_convert_encoding($text, 'HTML-ENTITIES', 'UTF-8');
+        
+        // FIX: Check if mbstring is available
+        if (function_exists('mb_convert_encoding')) {
+            return mb_convert_encoding($text, 'HTML-ENTITIES', 'UTF-8');
+        }
+        
+        // Fallback: Use htmlentities if mbstring is missing
+        return htmlentities($text, ENT_QUOTES, 'UTF-8');
     }
 
    private static function export_as_pdf($data, $title, $date, $include_timestamps, $timestamp_mode, $include_speakers, $paragraph_mode, $transcript_id, $include_highlights) {
-        // Check if TCPDF is available
-        $tcpdf_path = TRANSCRIBE_AI_PLUGIN_DIR . 'vendor/autoload.php';
-        if (!file_exists($tcpdf_path)) {
-            // Graceful fallback if the PDF library is not bundled
+    // Check if TCPDF is available
+    $tcpdf_path = TRANSCRIBE_AI_PLUGIN_DIR . 'vendor/autoload.php';
+    if (!file_exists($tcpdf_path)) {
+        // Fallback to HTML if TCPDF not installed
+        return self::export_as_html_fallback($data, $title, $date, $include_timestamps, $include_speakers, $paragraph_mode, $transcript_id, $include_highlights);
+    }
+    
+require_once($tcpdf_path);
+
+        // FIX: Add a check for the TCPDF class AFTER requiring the autoload
+        if (!class_exists('TCPDF')) {
+            // This means autoload.php exists, but the library is missing (e.g., composer install not run)
+            // Fall back to HTML export
             return self::export_as_html_fallback(
                 $data,
                 $title,
@@ -2138,225 +2151,140 @@ private static function map_hex_to_word_color($hex) {
             );
         }
 
-        require_once($tcpdf_path);
-
         // Create new PDF document
         $pdf = new TCPDF(PDF_PAGE_ORIENTATION, PDF_UNIT, PDF_PAGE_FORMAT, true, 'UTF-8', false);
+    
+$clean_title = self::strip_invalid_xml_chars($title);
 
         // Set document information
         $pdf->SetCreator('Transcribe AI');
         $pdf->SetAuthor('Transcribe AI');
-        $pdf->SetTitle($title);
+        $pdf->SetTitle($clean_title);
         $pdf->SetSubject('Transcript');
+    
+    // Remove default header/footer
+    $pdf->setPrintHeader(false);
+    $pdf->setPrintFooter(false);
+    
+    // Set margins
+    $pdf->SetMargins(15, 15, 15);
+    $pdf->SetAutoPageBreak(TRUE, 15);
+    
+    // Set font
+    $pdf->SetFont('dejavusans', '', 10);
+    
+    // Add a page
+    $pdf->AddPage();
+    
+    // Title
+   	$pdf->SetFont('dejavusans', 'B', 16);
+    $pdf->Cell(0, 10, $clean_title, 0, 1);
+    
+    // Date
+    $pdf->SetFont('dejavusans', '', 10);
+    $pdf->SetTextColor(128, 128, 128);
+    $pdf->Cell(0, 5, $date, 0, 1);
+    $pdf->Ln(5);
+    
+    // Reset text color
+    $pdf->SetTextColor(0, 0, 0);
+    
+    // Get highlights if needed
+    $highlights = ($include_highlights && $transcript_id) ? self::get_highlights_for_export($transcript_id) : [];
+    
+    // Process utterances
+    $utterances = isset($data['utterances']) ? $data['utterances'] : [];
 
-        // Remove default header/footer
-        $pdf->setPrintHeader(false);
-        $pdf->setPrintFooter(false);
+    $options = [
+        'include_timestamps' => $include_timestamps,
+        'timestamp_mode' => $timestamp_mode,
+        'include_speakers' => $include_speakers,
+        'paragraph_mode' => $paragraph_mode,
+        'include_highlights' => $include_highlights,
+        'highlights' => $highlights
+    ];
 
-        // Set margins
-        $pdf->SetMargins(15, 15, 15);
-        $pdf->SetAutoPageBreak(true, 15);
+$paragraphs = self::prepare_export_paragraphs($utterances, $options);
 
-        // Set font
-        $pdf->SetFont('dejavusans', '', 10);
-
-        // Add a page
-        $pdf->AddPage();
-
-        // Title
-        $pdf->SetFont('dejavusans', 'B', 16);
-        $pdf->Cell(0, 10, $title, 0, 1);
-
-        // Date
-        $pdf->SetFont('dejavusans', '', 10);
-        $pdf->SetTextColor(128, 128, 128);
-        $pdf->Cell(0, 5, $date, 0, 1);
-        $pdf->Ln(5);
-
-        // Reset text color
-        $pdf->SetTextColor(0, 0, 0);
-
-        // Get highlights if needed
-        $highlights = ($include_highlights && $transcript_id) ? self::get_highlights_for_export($transcript_id) : [];
-
-        // Process utterances
-        $utterances = isset($data['utterances']) ? $data['utterances'] : [];
-
-        $options = [
-            'include_timestamps' => $include_timestamps,
-            'timestamp_mode' => $timestamp_mode,
-            'include_speakers' => $include_speakers,
-            'paragraph_mode' => $paragraph_mode,
-            'include_highlights' => $include_highlights,
-            'highlights' => $highlights,
-        ];
-
-        $paragraphs = self::prepare_export_paragraphs($utterances, $options);
-
-        foreach ($paragraphs as $paragraph) {
-            if (empty($paragraph['segments'])) {
-                $pdf->Ln(6);
-                continue;
-            }
-
-            $html = '<span style="font-size:10pt; font-family:dejavusans; white-space: pre-wrap;">';
-            foreach ($paragraph['segments'] as $segment) {
-                $text = isset($segment['text']) ? $segment['text'] : '';
-                if ($text === '') {
-                    continue;
-                }
-
-                $encoded = htmlspecialchars($text, ENT_QUOTES | ENT_HTML5, 'UTF-8');
-                $open = '';
-                $close = '';
-
-                if (!empty($segment['bold'])) {
-                    $open .= '<strong>';
-                    $close = '</strong>' . $close;
-                }
-
-                if (!empty($segment['color'])) {
-                    $color = sanitize_hex_color($segment['color']);
-                    if (!$color) {
-                        $color = '#ffff00';
-                    }
-                    $open .= '<span style="background-color:' . $color . ';">';
-                    $close = '</span>' . $close;
-                }
-
-                $html .= $open . $encoded . $close;
-            }
-            $html .= '</span>';
-
-            $pdf->writeHTML($html, true, false, true, false, '');
-
-            if ($paragraph_mode !== 'continuous') {
-                $pdf->Ln(2);
-            }
-        }
-
-        // Save PDF to temp file
-        $upload_dir = wp_upload_dir();
-        $temp_dir = $upload_dir['basedir'] . '/transcribe-ai-temp/';
-        if (!file_exists($temp_dir)) {
-            wp_mkdir_p($temp_dir);
-        }
-
-        $safe_title = sanitize_file_name($title);
-        $filename = $safe_title . '_' . uniqid() . '.pdf';
-        $filepath = $temp_dir . $filename;
-
-        $pdf->Output($filepath, 'F');
-
-        $download_url = add_query_arg([
-            'transcribe_download' => 1,
-            'file' => basename($filepath),
-            'nonce' => wp_create_nonce('download_' . basename($filepath)),
-            'display' => rawurlencode(base64_encode(self::build_export_filename($title, 'pdf')))
-        ], home_url('/'));
-
-        wp_schedule_single_event(time() + 3600, 'transcribe_ai_cleanup_temp_file', [$filepath]);
-
-        return [
-            'download_url' => $download_url,
-            'filename' => self::build_export_filename($title, 'pdf'),
-            'is_download_url' => true,
-            'message' => __('PDF generated successfully!', 'transcribe-ai')
-        ];
+foreach ($paragraphs as $paragraph) {
+    if (empty($paragraph['segments'])) {
+        // This is an empty paragraph (e.g., between speaker groups)
+        $pdf->Ln(6);
+        continue;
     }
 
-    private static function export_as_html_fallback($data, $title, $date, $include_timestamps, $timestamp_mode, $include_speakers, $paragraph_mode, $transcript_id, $include_highlights) {
-        $highlights = ($include_highlights && $transcript_id) ? self::get_highlights_for_export($transcript_id) : [];
-        $utterances = isset($data['utterances']) ? $data['utterances'] : [];
-
-        $options = [
-            'include_timestamps' => $include_timestamps,
-            'timestamp_mode' => $timestamp_mode,
-            'include_speakers' => $include_speakers,
-            'paragraph_mode' => $paragraph_mode,
-            'include_highlights' => $include_highlights,
-            'highlights' => $highlights,
-        ];
-
-        $paragraphs = self::prepare_export_paragraphs($utterances, $options);
-
-        $html = '<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">';
-        $html .= '<title>' . esc_html($title) . '</title>';
-        $html .= '<style>body{font-family:Arial,Helvetica,sans-serif;margin:24px;color:#111;line-height:1.6;}';
-        $html .= 'h1{font-size:24px;margin:0 0 8px;}';
-        $html .= '.transcript-date{color:#555;margin:0 0 24px;}';
-        $html .= '.transcript-paragraph{white-space:pre-wrap;margin:0 0 16px;font-size:14px;}';
-        $html .= '.transcript-gap{height:12px;}';
-        $html .= '.transcript-highlight{padding:0 2px;border-radius:2px;}';
-        $html .= '</style></head><body>';
-        $html .= '<h1>' . esc_html($title) . '</h1>';
-        $html .= '<p class="transcript-date">' . esc_html($date) . '</p>';
-
-        foreach ($paragraphs as $paragraph) {
-            if (empty($paragraph['segments'])) {
-                $html .= '<div class="transcript-gap"></div>';
-                continue;
-            }
-
-            $html .= '<p class="transcript-paragraph">';
-            foreach ($paragraph['segments'] as $segment) {
-                $text = isset($segment['text']) ? $segment['text'] : '';
-                if ($text === '') {
-                    continue;
-                }
-
-                $encoded = esc_html($text);
-                $open = '';
-                $close = '';
-
-                if (!empty($segment['bold'])) {
-                    $open .= '<strong>';
-                    $close = '</strong>' . $close;
-                }
-
-                if (!empty($segment['color'])) {
-                    $color = sanitize_hex_color($segment['color']);
-                    if (!$color) {
-                        $color = '#ffff00';
-                    }
-                    $open .= '<span class="transcript-highlight" style="background-color:' . esc_attr($color) . ';">';
-                    $close = '</span>' . $close;
-                }
-
-                $html .= $open . $encoded . $close;
-            }
-            $html .= '</p>';
+    // Loop through each segment (text, highlight, etc.)
+    foreach ($paragraph['segments'] as $segment) {
+        $text = isset($segment['text']) ? $segment['text'] : '';
+        if ($text === '') {
+            continue;
         }
 
-        $html .= '</body></html>';
+        // FIX: Clean the text segment
+        $clean_text = self::strip_invalid_xml_chars($text);
 
-        $upload_dir = wp_upload_dir();
-        $temp_dir = $upload_dir['basedir'] . '/transcribe-ai-temp/';
-        if (!file_exists($temp_dir)) {
-            wp_mkdir_p($temp_dir);
+        // Set font style (bold or normal)
+        $pdf->SetFont('dejavusans', !empty($segment['bold']) ? 'B' : '', 10);
+
+        // Set background color for highlights
+        if (!empty($segment['color'])) {
+            $rgb = self::hex_to_rgb($segment['color']);
+            $pdf->SetFillColor($rgb[0], $rgb[1], $rgb[2]);
+            $pdf->Write(0, $clean_text, '', true); // 'true' = fill background
+        } else {
+            $pdf->SetFillColor(255, 255, 255); // Reset fill
+            $pdf->Write(0, $clean_text, '', false); // 'false' = no fill
         }
-
-        $filename = 'transcript_' . uniqid() . '.html';
-        $filepath = trailingslashit($temp_dir) . $filename;
-        file_put_contents($filepath, $html);
-
-        $download_url = add_query_arg([
-            'transcribe_download' => 1,
-            'file' => basename($filepath),
-            'nonce' => wp_create_nonce('download_' . basename($filepath)),
-            'display' => rawurlencode(base64_encode(self::build_export_filename($title, 'html')))
-        ], home_url('/'));
-
-        wp_schedule_single_event(time() + 3600, 'transcribe_ai_cleanup_temp_file', [$filepath]);
-
-        return [
-            'download_url' => $download_url,
-            'filename' => self::build_export_filename($title, 'html'),
-            'is_download_url' => true,
-            'message' => __('PDF export unavailable - provided HTML instead.', 'transcribe-ai')
-        ];
     }
 
+    // Add a line break after the full paragraph
+    if ($paragraph_mode !== 'continuous') {
+        $pdf->Ln(8);
+    }
+}
+
+    // Save PDF to temp file
+    $upload_dir = wp_upload_dir();
+    $temp_dir = $upload_dir['basedir'] . '/transcribe-ai-temp/';
+    if (!file_exists($temp_dir)) {
+        wp_mkdir_p($temp_dir);
+    }
+    
+    $safe_title = sanitize_file_name($title);
+    $filename = $safe_title . '_' . uniqid() . '.pdf';
+    $filepath = $temp_dir . $filename;
+
+    $pdf->Output($filepath, 'F');
+
+    // Create download URL
+    $download_url = add_query_arg([
+        'transcribe_download' => 1,
+        'file' => basename($filepath),
+        'nonce' => wp_create_nonce('download_' . basename($filepath)),
+        'display' => rawurlencode(base64_encode(self::build_export_filename($title, 'pdf')))
+    ], home_url('/'));
+
+    // Schedule cleanup
+    wp_schedule_single_event(time() + 3600, 'transcribe_ai_cleanup_temp_file', [$filepath]);
+
+    return [
+        'download_url' => $download_url,
+        'filename' => self::build_export_filename($title, 'pdf'),
+        'is_download_url' => true,
+        'message' => 'PDF generated successfully!'
+    ];
+}
+
+// Helper function to convert hex to RGB
+private static function hex_to_rgb($hex) {
+    $hex = ltrim($hex, '#');
+    return [
+        hexdec(substr($hex, 0, 2)),
+        hexdec(substr($hex, 2, 2)),
+        hexdec(substr($hex, 4, 2))
+    ];
+}
+    
     private static function generate_html_for_export($data, $title, $date, $include_timestamps, $include_speakers, $paragraph_mode, $transcript_id, $include_highlights) {
         $html = '<h1>' . esc_html($title) . '</h1>';
         $html .= '<p class="meta">' . esc_html($date) . '</p>';
