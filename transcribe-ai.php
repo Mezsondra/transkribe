@@ -50,6 +50,7 @@ function transcribe_ai_activate() {
     global $wpdb;
     $table_name = $wpdb->prefix . 'transcribe_ai_guest_usage';
     $highlights_table = $wpdb->prefix . 'transcribe_ai_highlights';
+    $tracking_table = $wpdb->prefix . 'transcribe_ai_guest_tracking';
     
     $charset_collate = $wpdb->get_charset_collate();
     
@@ -83,9 +84,26 @@ function transcribe_ai_activate() {
         KEY guest_id (guest_id)
     ) $charset_collate;";
     
+    // SECURITY: Guest tracking table to prevent cookie deletion bypass
+    $sql3 = "CREATE TABLE IF NOT EXISTS $tracking_table (
+        id bigint(20) NOT NULL AUTO_INCREMENT,
+        guest_id varchar(64) NOT NULL,
+        fingerprint varchar(64) NOT NULL,
+        ip_address varchar(45) NOT NULL,
+        user_agent varchar(255) DEFAULT NULL,
+        first_seen datetime DEFAULT CURRENT_TIMESTAMP,
+        last_seen datetime DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (id),
+        UNIQUE KEY guest_id (guest_id),
+        INDEX fingerprint_idx (fingerprint),
+        INDEX ip_address_idx (ip_address),
+        INDEX last_seen_idx (last_seen)
+    ) $charset_collate;";
+    
     require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
     dbDelta($sql);
     dbDelta($sql2);
+    dbDelta($sql3);
 }
 
 function transcribe_ai_deactivate() {
@@ -492,7 +510,7 @@ class Transcribe_AI_Helpers {
         } else {
             $guest_id = self::get_guest_id();
             $used_minutes = self::get_guest_usage($guest_id);
-            $monthly_limit = 20;
+            $monthly_limit = 30;
             
             return [
                 'is_logged_in' => false,
@@ -506,33 +524,114 @@ class Transcribe_AI_Helpers {
         }
     }
     
-    // FIX #16: Improved cookie security
+    // SECURITY FIX: Multi-factor guest tracking (IP + Browser Fingerprint + Cookie)
     public static function get_guest_id() {
-        if (isset($_COOKIE['transcribe_ai_guest_id'])) {
-            return sanitize_text_field($_COOKIE['transcribe_ai_guest_id']);
+        // Generate a fingerprint based on multiple factors
+        $ip = self::get_client_ip();
+        $user_agent = isset($_SERVER['HTTP_USER_AGENT']) ? $_SERVER['HTTP_USER_AGENT'] : '';
+        $accept_language = isset($_SERVER['HTTP_ACCEPT_LANGUAGE']) ? $_SERVER['HTTP_ACCEPT_LANGUAGE'] : '';
+        $accept_encoding = isset($_SERVER['HTTP_ACCEPT_ENCODING']) ? $_SERVER['HTTP_ACCEPT_ENCODING'] : '';
+        
+        // Create a browser fingerprint (harder to fake than just IP)
+        $fingerprint = hash('sha256', $ip . '|' . $user_agent . '|' . $accept_language . '|' . $accept_encoding);
+        
+        // Check if we have a valid cookie
+        $cookie_id = isset($_COOKIE['transcribe_ai_guest_id']) ? sanitize_text_field($_COOKIE['transcribe_ai_guest_id']) : null;
+        
+        // Try to find existing guest by fingerprint OR cookie
+        global $wpdb;
+        $table_name = $wpdb->prefix . 'transcribe_ai_guest_tracking';
+        
+        $guest_record = null;
+        
+        // First, try to find by cookie if it exists
+        if ($cookie_id) {
+            $guest_record = $wpdb->get_row($wpdb->prepare(
+                "SELECT * FROM $table_name WHERE guest_id = %s AND last_seen > %s",
+                $cookie_id,
+                date('Y-m-d H:i:s', strtotime('-90 days'))
+            ));
         }
         
-        $ip = isset($_SERVER['REMOTE_ADDR']) ? $_SERVER['REMOTE_ADDR'] : '';
-        $user_agent = isset($_SERVER['HTTP_USER_AGENT']) ? $_SERVER['HTTP_USER_AGENT'] : '';
-        $timestamp = time();
-        $random = wp_generate_password(16, false); // Longer random string
+        // If not found by cookie, try by fingerprint (catches cookie deletion)
+        if (!$guest_record) {
+            $guest_record = $wpdb->get_row($wpdb->prepare(
+                "SELECT * FROM $table_name WHERE fingerprint = %s AND last_seen > %s",
+                $fingerprint,
+                date('Y-m-d H:i:s', strtotime('-90 days'))
+            ));
+        }
         
-        $guest_id = hash('sha256', $ip . $user_agent . $timestamp . $random);
+        // If found existing guest, update and return their ID
+        if ($guest_record) {
+            $guest_id = $guest_record->guest_id;
+            
+            // Update last seen
+            $wpdb->update(
+                $table_name,
+                [
+                    'last_seen' => current_time('mysql'),
+                    'fingerprint' => $fingerprint,
+                    'ip_address' => $ip
+                ],
+                ['guest_id' => $guest_id]
+            );
+        } else {
+            // Create new guest record
+            $guest_id = hash('sha256', $fingerprint . time() . wp_generate_password(16, false));
+            
+            $wpdb->insert($table_name, [
+                'guest_id' => $guest_id,
+                'fingerprint' => $fingerprint,
+                'ip_address' => $ip,
+                'user_agent' => substr($user_agent, 0, 255),
+                'first_seen' => current_time('mysql'),
+                'last_seen' => current_time('mysql')
+            ]);
+        }
         
-        // FIX #16: Always use secure flag in production, detect HTTPS properly
+        // Set/refresh cookie
         $is_https = (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on') || 
                     (isset($_SERVER['HTTP_X_FORWARDED_PROTO']) && $_SERVER['HTTP_X_FORWARDED_PROTO'] === 'https');
         
         setcookie('transcribe_ai_guest_id', $guest_id, [
-            'expires' => time() + (30 * DAY_IN_SECONDS),
+            'expires' => time() + (90 * DAY_IN_SECONDS),
             'path' => '/',
-            'domain' => '', // Let browser set domain
-            'secure' => $is_https, // Fixed detection
+            'domain' => '',
+            'secure' => $is_https,
             'httponly' => true,
             'samesite' => 'Lax'
         ]);
         
         return $guest_id;
+    }
+    
+    /**
+     * Get real client IP address (handles proxies and load balancers)
+     */
+    public static function get_client_ip() {
+        $ip_keys = [
+            'HTTP_CF_CONNECTING_IP', // Cloudflare
+            'HTTP_X_FORWARDED_FOR',  // Standard proxy header
+            'HTTP_X_REAL_IP',        // Nginx proxy
+            'REMOTE_ADDR'            // Direct connection
+        ];
+        
+        foreach ($ip_keys as $key) {
+            if (isset($_SERVER[$key])) {
+                $ip = $_SERVER[$key];
+                // Handle comma-separated IPs (take first one)
+                if (strpos($ip, ',') !== false) {
+                    $ip = trim(explode(',', $ip)[0]);
+                }
+                // Validate IP
+                if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE)) {
+                    return $ip;
+                }
+            }
+        }
+        
+        return isset($_SERVER['REMOTE_ADDR']) ? $_SERVER['REMOTE_ADDR'] : '0.0.0.0';
     }
     
     public static function get_guest_usage($guest_id) {
@@ -563,6 +662,48 @@ class Transcribe_AI_Helpers {
             $minutes,
             $minutes
         ));
+        
+        // Also track IP usage for guests
+        $ip = self::get_client_ip();
+        self::update_ip_usage($ip, $minutes);
+    }
+    
+    /**
+     * Track usage by IP address (prevents VPN hopping)
+     */
+    public static function update_ip_usage($ip, $minutes) {
+        global $wpdb;
+        $table_name = $wpdb->prefix . 'transcribe_ai_guest_usage';
+        $month_year = date('Y-m');
+        $ip_guest_id = 'ip_' . hash('sha256', $ip);
+        
+        $wpdb->query($wpdb->prepare(
+            "INSERT INTO $table_name (guest_id, month_year, minutes_used) 
+             VALUES (%s, %s, %d) 
+             ON DUPLICATE KEY UPDATE minutes_used = minutes_used + %d",
+            $ip_guest_id,
+            $month_year,
+            $minutes,
+            $minutes
+        ));
+    }
+    
+    /**
+     * Get IP address monthly usage
+     */
+    public static function get_ip_monthly_usage($ip) {
+        global $wpdb;
+        $table_name = $wpdb->prefix . 'transcribe_ai_guest_usage';
+        $month_year = date('Y-m');
+        $ip_guest_id = 'ip_' . hash('sha256', $ip);
+        
+        $usage = $wpdb->get_var($wpdb->prepare(
+            "SELECT minutes_used FROM $table_name WHERE guest_id = %s AND month_year = %s",
+            $ip_guest_id,
+            $month_year
+        ));
+        
+        return intval($usage);
     }
     
     public static function update_usage($user_id, $minutes) {
@@ -848,9 +989,21 @@ class Transcribe_AI_Ajax {
         
         $user_data = Transcribe_AI_Helpers::get_user_data();
         
+        // Check per-user limits
         if ($user_data['minutes_remaining'] !== 'unlimited' && $user_data['minutes_remaining'] <= 0) {
             wp_send_json_error($user_data['is_logged_in'] ? 'Monthly transcription limit reached.' : 'Monthly guest limit reached.');
         }
+        
+// SECURITY: Additional IP-based rate limiting for guests (prevents VPN hopping)
+if (!$user_data['is_logged_in']) {
+    $ip = Transcribe_AI_Helpers::get_client_ip();
+    $ip_usage = Transcribe_AI_Helpers::get_ip_monthly_usage($ip);  // ← FIXED!
+    
+    // Allow max 40 minutes per IP per month (2x guest limit for shared IPs like schools/offices)
+    if ($ip_usage >= 40) {
+        wp_send_json_error('IP address has exceeded monthly limit. This prevents abuse while allowing shared network usage.');
+    }
+}
         
         if (!isset($_FILES['audio_file']) || $_FILES['audio_file']['error'] !== UPLOAD_ERR_OK) {
             wp_send_json_error('File upload failed');
@@ -2808,34 +2961,34 @@ private static function hex_to_rgb($hex) {
     }
     
     private static function ms_to_time($ms) {
-        $seconds = $ms / 1000;
-        $hours = floor($seconds / 3600);
-        $minutes = floor(($seconds % 3600) / 60);
-        $secs = floor($seconds % 60);
-        
-        if ($hours > 0) {
-            return sprintf('%02d:%02d:%02d', $hours, $minutes, $secs);
-        }
-        return sprintf('%02d:%02d', $minutes, $secs);
+    $seconds = $ms / 1000;
+    $hours = (int)floor($seconds / 3600);
+    $minutes = (int)floor(($seconds % 3600) / 60);
+    $secs = (int)floor($seconds % 60);
+    
+    if ($hours > 0) {
+        return sprintf('%02d:%02d:%02d', $hours, $minutes, $secs);
     }
+    return sprintf('%02d:%02d', $minutes, $secs);
+}
     
     private static function ms_to_srt_time($ms) {
-        $seconds = $ms / 1000;
-        $hours = floor($seconds / 3600);
-        $minutes = floor(($seconds % 3600) / 60);
-        $secs = floor($seconds % 60);
-        $millis = round(($seconds - floor($seconds)) * 1000);
-        return sprintf('%02d:%02d:%02d,%03d', $hours, $minutes, $secs, $millis);
-    }
+    $seconds = $ms / 1000;
+    $hours = (int)floor($seconds / 3600);
+    $minutes = (int)floor(($seconds % 3600) / 60);
+    $secs = (int)floor($seconds % 60);
+    $millis = (int)round(($seconds - floor($seconds)) * 1000);
+    return sprintf('%02d:%02d:%02d,%03d', $hours, $minutes, $secs, $millis);
+}
     
-    private static function ms_to_vtt_time($ms) {
-        $seconds = $ms / 1000;
-        $hours = floor($seconds / 3600);
-        $minutes = floor(($seconds % 3600) / 60);
-        $secs = floor($seconds % 60);
-        $millis = round(($seconds - floor($seconds)) * 1000);
-        return sprintf('%02d:%02d:%02d.%03d', $hours, $minutes, $secs, $millis);
-    }
+  private static function ms_to_vtt_time($ms) {
+    $seconds = $ms / 1000;
+    $hours = (int)floor($seconds / 3600);
+    $minutes = (int)floor(($seconds % 3600) / 60);
+    $secs = (int)floor($seconds % 60);
+    $millis = (int)round(($seconds - floor($seconds)) * 1000);
+    return sprintf('%02d:%02d:%02d.%03d', $hours, $minutes, $secs, $millis);
+}
 }
 
 // ==========================================
